@@ -39,6 +39,14 @@ export DATABASE_URL="postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@
 .venv/Scripts/python.exe -m pytest
 ```
 
+集成测试（`tests/test_wiki_integration.py`）连接独立的 `legalmind_test` 库，未设置 `TEST_DATABASE_URL` 时自动跳过。测试库首次需手动创建，测试会自动迁移：
+
+```bash
+docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "CREATE DATABASE legalmind_test"   # 在 legalmind/ 下执行，仅首次
+export TEST_DATABASE_URL="postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/legalmind_test"
+.venv/Scripts/python.exe -m pytest
+```
+
 ## 行为准则
 
 改编自 [andrej-karpathy-skills](https://github.com/multica-ai/andrej-karpathy-skills)（MIT）。偏向谨慎而非速度；琐碎任务自行判断。

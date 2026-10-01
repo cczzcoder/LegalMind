@@ -4,8 +4,8 @@ LegalMind：准确性优先、可追溯的法律知识库与辅助研究系统�
 
 ## 项目文档
 
-- [doc/法律知识库系统需求分析文档.md](doc/法律知识库系统需求分析文档.md)：FR-01 至 FR-12、非功能需求、验收标准
-- [doc/法律知识库系统设计文档.md](doc/法律知识库系统设计文档.md)：架构、数据模型、检索与问答流水线、实施阶段 P0–P6
+- [doc/法律知识库系统需求分析文档.md](doc/法律知识库系统需求分析文档.md)：FR-01 至 FR-13、分阶段交付 A/B/C、非功能需求、验收标准
+- [doc/法律知识库系统设计文档.md](doc/法律知识库系统设计文档.md)：架构、数据模型、检索与问答流水线、16 GB 单机资源档位、扩展触发条件、实施阶段 P0–P7
 - [doc/开发与部署指南.md](doc/开发与部署指南.md)：v0.1.0 脚手架生成脚本、启动与验证步骤
 
 动手前先查对应的 FR 编号和设计章节。文档与代码冲突时，指出冲突，不要自行选择一方。
@@ -35,9 +35,12 @@ cd backend
 set -a && . ../.env && set +a
 export DATABASE_URL="postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}"
 .venv/Scripts/python.exe -m alembic upgrade head
+.venv/Scripts/python.exe -m app.cli create-user --org 示例机构 --username admin --role system_admin   # 首次；密码交互输入
 .venv/Scripts/python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 .venv/Scripts/python.exe -m pytest
 ```
+
+系统不开放注册，用户只能由 CLI 或管理员通过 `/api/v1/users` 创建。
 
 集成测试（`tests/test_wiki_integration.py`）连接独立的 `legalmind_test` 库，未设置 `TEST_DATABASE_URL` 时自动跳过。测试库首次需手动创建，测试会自动迁移：
 
@@ -100,4 +103,5 @@ export TEST_DATABASE_URL="postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSW
 - **引用绑定不可变版本**：不绑定"最新页面"；日期未知存为未知，不虚构页码、日期或字符位置（设计 5.3、6）
 - **模型输出受约束**：模型只输出结构化主张和本次授权证据集中的证据 ID；引用标题和链接由服务端生成（设计 9.2）
 - **数据库变更走 Alembic 迁移**，不手工改表
+- **轻量部署优先**：开发基线为 16 GB 笔记本；不擅自引入 Elasticsearch、Qdrant、Celery/Redis、对象存储服务等组件，需满足设计第 18 节触发条件并经用户确认。资源不足时排队或降批次，不跳过核验（FR-13）
 - **敏感信息**：`.env`、密钥、数据库文件和原始资料不提交仓库，不写进日志、提示词或审计正文

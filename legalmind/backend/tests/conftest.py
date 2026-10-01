@@ -7,9 +7,6 @@ os.environ["APP_ENV"] = "test"
 os.environ["DATABASE_URL"] = (
     "postgresql+asyncpg://unused:unused@localhost/unused"
 )
-os.environ["DEV_API_KEY"] = "a" * 64
-os.environ["DEV_ORG_ID"] = "11111111-1111-4111-8111-111111111111"
-os.environ["DEV_USER_ID"] = "22222222-2222-4222-8222-222222222222"
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine

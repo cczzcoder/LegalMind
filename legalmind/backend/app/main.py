@@ -5,6 +5,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.database import engine
+from app.modules.identity.router import router as identity_router
 from app.modules.wiki.router import router as wiki_router
 
 
@@ -21,6 +22,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.include_router(identity_router, prefix="/api/v1")
 app.include_router(wiki_router, prefix="/api/v1")
 
 

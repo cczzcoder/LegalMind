@@ -1,8 +1,7 @@
 from functools import lru_cache
 from typing import Literal
-from uuid import UUID
 
-from pydantic import SecretStr, model_validator
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,21 +13,16 @@ class Settings(BaseSettings):
 
     app_env: Literal["development", "test", "production"] = "development"
     database_url: str
-    dev_api_key: SecretStr
-    dev_org_id: UUID
-    dev_user_id: UUID
+    # 本机 HTTP 开发时为 false；经 HTTPS 反向代理部署时必须为 true
+    session_cookie_secure: bool = False
 
     @model_validator(mode="after")
     def validate_security_mode(self):
         if self.app_env == "production":
             raise ValueError(
-                "Production is disabled until real authentication "
-                "and authorization are implemented."
+                "Production is disabled until administrator MFA and "
+                "object-level authorization are implemented."
             )
-
-        key = self.dev_api_key.get_secret_value()
-        if len(key) < 32 or key.startswith("REPLACE"):
-            raise ValueError("Configure a random DEV_API_KEY.")
 
         return self
 

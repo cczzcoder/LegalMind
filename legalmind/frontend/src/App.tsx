@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Alert,
   Button,
@@ -26,8 +26,18 @@ type Revision = {
   created_at: string;
 };
 
+type CurrentUser = {
+  id: string;
+  username: string;
+  roles: string[];
+  csrf_token: string;
+};
+
 export default function App() {
-  const [key, setKey] = useState("");
+  // 会话令牌在 HttpOnly Cookie 中，前端只持有 CSRF 令牌（仅内存）
+  const [user, setUser] = useState<CurrentUser | null>(null);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [pages, setPages] = useState<Page[]>([]);
   const [selected, setSelected] = useState<Page | null>(null);
   const [revisions, setRevisions] = useState<Revision[]>([]);
@@ -42,7 +52,11 @@ export default function App() {
     init: RequestInit = {},
   ): Promise<T> {
     const headers = new Headers(init.headers);
-    headers.set("X-Dev-Key", key);
+    const method = init.method ?? "GET";
+
+    if (method !== "GET" && user) {
+      headers.set("X-CSRF-Token", user.csrf_token);
+    }
 
     if (init.body !== undefined) {
       headers.set("Content-Type", "application/json");
@@ -51,10 +65,16 @@ export default function App() {
     const response = await fetch(`/api/v1${path}`, {
       ...init,
       headers,
+      credentials: "same-origin",
     });
 
     if (!response.ok) {
       const payload = await response.json().catch(() => null);
+
+      if (response.status === 401 && path !== "/auth/login") {
+        clearWorkspace();
+      }
+
       throw new Error(
         `${response.status}: ${
           payload?.detail
@@ -64,8 +84,54 @@ export default function App() {
       );
     }
 
+    if (response.status === 204) {
+      return undefined as T;
+    }
+
     return response.json() as Promise<T>;
   }
+
+  function clearWorkspace() {
+    setUser(null);
+    setPages([]);
+    setSelected(null);
+    setRevisions([]);
+    setTitle("");
+    setBody("");
+  }
+
+  // 刷新页面后用已有会话恢复登录状态；未登录时静默忽略 401
+  useEffect(() => {
+    fetch("/api/v1/auth/me", { credentials: "same-origin" })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((result: CurrentUser | null) => {
+        if (result) {
+          setUser(result);
+        }
+      })
+      .catch(() => undefined);
+  }, []);
+
+  async function login() {
+    const result = await api<CurrentUser>("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    });
+    setPassword("");
+    setUser(result);
+  }
+
+  async function logout() {
+    try {
+      await api<void>("/auth/logout", { method: "POST" });
+    } finally {
+      clearWorkspace();
+    }
+  }
+
+  const canWrite = Boolean(
+    user?.roles.some((role) => ["editor", "knowledge_admin"].includes(role)),
+  );
 
   async function execute(task: () => Promise<void>) {
     setBusy(true);
@@ -165,49 +231,71 @@ export default function App() {
         showIcon
         message="仅供本地开发"
         description={
-          "当前只有 Wiki 草稿与修订能力。未实现正式登录、审核发布、法律检索或 AI 问答。"
+          "当前只有登录、角色权限和 Wiki 草稿与修订能力。未实现管理员 MFA、页面级授权、审核发布、法律检索或 AI 问答。"
         }
       />
 
-      <Card title="开发身份" className="section">
-        <Space wrap>
-          <Input.Password
-            value={key}
-            onChange={(event) => {
-              setKey(event.target.value);
-              setPages([]);
-              setSelected(null);
-              setRevisions([]);
-              setTitle("");
-              setBody("");
-              setError("");
-              setNotice("");
-            }}
-            disabled={busy}
-            placeholder="输入 .env 中的 DEV_API_KEY"
-            style={{ width: 360 }}
-          />
-          <Button
-            disabled={!key || busy}
-            onClick={() => void execute(loadPages)}
-          >
-            加载页面
-          </Button>
-          <Button
-            disabled={busy}
-            onClick={() => {
-              setKey("");
-              setPages([]);
-              newPage();
+      {user ? (
+        <Card title="当前用户" className="section">
+          <Space wrap>
+            <Typography.Text>
+              {user.username}（{user.roles.join("、")}）
+            </Typography.Text>
+            <Button
+              disabled={busy}
+              onClick={() => void execute(loadPages)}
+            >
+              加载页面
+            </Button>
+            <Button disabled={busy} onClick={() => void execute(logout)}>
+              退出登录
+            </Button>
+          </Space>
+          {!canWrite && (
+            <Typography.Paragraph type="secondary">
+              当前角色只有阅读权限，不能保存修订。
+            </Typography.Paragraph>
+          )}
+        </Card>
+      ) : (
+        <Card title="登录" className="section">
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              void execute(login);
             }}
           >
-            清除身份与页面
-          </Button>
-        </Space>
-        <Typography.Paragraph type="secondary">
-          Key 只保存在当前页面内存中，不写入浏览器存储。
-        </Typography.Paragraph>
-      </Card>
+            <Space wrap>
+              <Input
+                aria-label="用户名"
+                autoComplete="username"
+                placeholder="用户名"
+                value={username}
+                disabled={busy}
+                onChange={(event) => setUsername(event.target.value)}
+                style={{ width: 200 }}
+              />
+              <Input.Password
+                aria-label="密码"
+                autoComplete="current-password"
+                placeholder="密码"
+                value={password}
+                disabled={busy}
+                onChange={(event) => setPassword(event.target.value)}
+                style={{ width: 240 }}
+              />
+              <Button
+                type="primary"
+                htmlType="submit"
+                loading={busy}
+                disabled={!username || !password}
+              >
+                登录
+              </Button>
+            </Space>
+          </form>
+        </Card>
+      )}
 
       {error && (
         <Alert
@@ -286,7 +374,7 @@ export default function App() {
             <Button
               type="primary"
               loading={busy}
-              disabled={!key || !title.trim() || !body.trim()}
+              disabled={!canWrite || !title.trim() || !body.trim()}
               onClick={() => void execute(saveDraft)}
             >
               保存新修订

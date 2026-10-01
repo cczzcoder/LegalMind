@@ -6,8 +6,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
-from app.core.security import Principal, get_principal
+from app.core.security import Principal
 from app.models import WikiPage, WikiRevision
+from app.modules.authorization.service import WIKI_READ, WIKI_WRITE, require_permission
 from app.modules.wiki import service
 from app.modules.wiki.schemas import (
     CreatePage,
@@ -19,13 +20,14 @@ from app.modules.wiki.schemas import (
 router = APIRouter(prefix="/wiki", tags=["wiki"])
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
-PrincipalDep = Annotated[Principal, Depends(get_principal)]
+ReaderDep = Annotated[Principal, Depends(require_permission(WIKI_READ))]
+WriterDep = Annotated[Principal, Depends(require_permission(WIKI_WRITE))]
 
 
 @router.get("/pages", response_model=list[PageOut])
 async def list_pages(
     session: SessionDep,
-    principal: PrincipalDep,
+    principal: ReaderDep,
     before: UUID | None = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ):
@@ -46,7 +48,7 @@ async def list_pages(
 async def create_page(
     data: CreatePage,
     session: SessionDep,
-    principal: PrincipalDep,
+    principal: WriterDep,
 ):
     return await service.create_page(session, principal, data)
 
@@ -60,7 +62,7 @@ async def create_revision(
     page_id: UUID,
     data: CreateRevision,
     session: SessionDep,
-    principal: PrincipalDep,
+    principal: WriterDep,
 ):
     return await service.create_revision(
         session,
@@ -77,7 +79,7 @@ async def create_revision(
 async def list_revisions(
     page_id: UUID,
     session: SessionDep,
-    principal: PrincipalDep,
+    principal: ReaderDep,
     before: Annotated[int | None, Query(ge=1)] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ):

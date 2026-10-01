@@ -21,7 +21,7 @@ pytestmark = pytest.mark.anyio
 
 def new_principal() -> Principal:
     # 每个测试使用随机组织，测试之间互不干扰
-    return Principal(organization_id=uuid4(), user_id=uuid4())
+    return Principal(organization_id=uuid4(), user_id=uuid4(), roles=frozenset({"editor"}))
 
 
 async def count(session_factory, model, organization_id: UUID) -> int:

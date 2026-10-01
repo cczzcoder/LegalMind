@@ -1,0 +1,2 @@
+# 本机运行产生的日志（legalmind/ 内的忽略规则见 legalmind/.gitignore）
+*.log

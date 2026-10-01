@@ -1,0 +1,6 @@
+# 本机开发：只启动 PostgreSQL，并暴露到本机，供宿主机上的 API 和 Alembic 连接。
+# 用法：docker compose -f compose.yaml -f compose.localdb.yaml up -d postgres
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:5432:5432"

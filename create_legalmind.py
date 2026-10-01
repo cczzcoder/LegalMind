@@ -1,0 +1,1734 @@
+from pathlib import Path
+from textwrap import dedent
+import secrets
+
+
+ROOT = Path("legalmind")
+
+if ROOT.exists():
+    raise SystemExit(
+        "legalmind already exists. Rename or move it before generating."
+    )
+
+
+FILES = {
+
+".gitignore": r'''
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+node_modules/
+dist/
+data/
+backups/
+evaluations/reports/*
+!evaluations/reports/.gitkeep
+''',
+
+".env.example": r'''
+APP_ENV=development
+
+POSTGRES_USER=legalmind
+POSTGRES_PASSWORD=REPLACE_DB_PASSWORD
+POSTGRES_DB=legalmind
+
+DEV_API_KEY=REPLACE_DEV_KEY
+DEV_ORG_ID=11111111-1111-4111-8111-111111111111
+DEV_USER_ID=22222222-2222-4222-8222-222222222222
+''',
+
+"compose.yaml": r'''
+name: legalmind
+
+x-backend-environment: &backend-environment
+  APP_ENV: ${APP_ENV:-development}
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  DEV_API_KEY: ${DEV_API_KEY:?required}
+  DEV_ORG_ID: ${DEV_ORG_ID:?required}
+  DEV_USER_ID: ${DEV_USER_ID:?required}
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      POSTGRES_DB: ${POSTGRES_DB:?required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: ./backend
+    environment: *backend-environment
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: ./backend
+    environment: *backend-environment
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "127.0.0.1:5173:5173"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+''',
+
+"backend/pyproject.toml": r'''
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "legalmind"
+version = "0.1.0"
+description = "Evidence-first legal knowledge and research system"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.30,<1",
+    "pydantic>=2.9,<3",
+    "pydantic-settings>=2.5,<3",
+    "sqlalchemy[asyncio]>=2.0,<2.1",
+    "asyncpg>=0.29,<1",
+    "alembic>=1.13,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<10",
+    "httpx>=0.27,<1",
+    "ruff>=0.9,<1",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+''',
+
+"backend/Dockerfile": r'''
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /code
+
+COPY pyproject.toml ./
+COPY app ./app
+COPY migrations ./migrations
+COPY alembic.ini ./
+COPY tests ./tests
+
+# Development image only.
+RUN pip install --no-cache-dir ".[dev]"
+
+RUN useradd --create-home --uid 10001 appuser
+USER appuser
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+''',
+
+"backend/app/core/config.py": r'''
+from functools import lru_cache
+from typing import Literal
+from uuid import UUID
+
+from pydantic import SecretStr, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        extra="ignore",
+    )
+
+    app_env: Literal["development", "test", "production"] = "development"
+    database_url: str
+    dev_api_key: SecretStr
+    dev_org_id: UUID
+    dev_user_id: UUID
+
+    @model_validator(mode="after")
+    def validate_security_mode(self):
+        if self.app_env == "production":
+            raise ValueError(
+                "Production is disabled until real authentication "
+                "and authorization are implemented."
+            )
+
+        key = self.dev_api_key.get_secret_value()
+        if len(key) < 32 or key.startswith("REPLACE"):
+            raise ValueError("Configure a random DEV_API_KEY.")
+
+        return self
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+''',
+
+"backend/app/core/database.py": r'''
+from collections.abc import AsyncIterator
+
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.orm import DeclarativeBase
+
+from app.core.config import get_settings
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+engine = create_async_engine(
+    get_settings().database_url,
+    pool_pre_ping=True,
+)
+
+SessionFactory = async_sessionmaker(
+    engine,
+    expire_on_commit=False,
+)
+
+
+async def get_session() -> AsyncIterator[AsyncSession]:
+    async with SessionFactory() as session:
+        yield session
+''',
+
+"backend/app/core/security.py": r'''
+import secrets
+from dataclasses import dataclass
+from typing import Annotated
+from uuid import UUID
+
+from fastapi import Depends, HTTPException
+from fastapi.security import APIKeyHeader
+
+from app.core.config import get_settings
+
+
+api_key_header = APIKeyHeader(
+    name="X-Dev-Key",
+    auto_error=False,
+)
+
+
+@dataclass(frozen=True)
+class Principal:
+    organization_id: UUID
+    user_id: UUID
+
+
+async def get_principal(
+    key: Annotated[str | None, Depends(api_key_header)],
+) -> Principal:
+    settings = get_settings()
+    expected = settings.dev_api_key.get_secret_value()
+
+    if key is None or not secrets.compare_digest(
+        key.encode("utf-8"),
+        expected.encode("utf-8"),
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid development credentials",
+        )
+
+    return Principal(
+        organization_id=settings.dev_org_id,
+        user_id=settings.dev_user_id,
+    )
+''',
+
+"backend/app/models.py": r'''
+from datetime import datetime
+from uuid import UUID, uuid4
+
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.core.database import Base
+
+
+class WikiPage(Base):
+    __tablename__ = "wiki_pages"
+    __table_args__ = (
+        CheckConstraint(
+            "head_revision >= 1",
+            name="ck_wiki_page_head_positive",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        primary_key=True,
+        default=uuid4,
+    )
+    organization_id: Mapped[UUID] = mapped_column(index=True)
+    title: Mapped[str] = mapped_column(String(200))
+    head_revision: Mapped[int] = mapped_column(Integer)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+
+class WikiRevision(Base):
+    __tablename__ = "wiki_revisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "page_id",
+            "number",
+            name="uq_wiki_revision_number",
+        ),
+        CheckConstraint(
+            "number > 0",
+            name="ck_wiki_revision_positive",
+        ),
+        CheckConstraint(
+            "status = 'draft'",
+            name="ck_wiki_draft_only",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        primary_key=True,
+        default=uuid4,
+    )
+    page_id: Mapped[UUID] = mapped_column(
+        ForeignKey("wiki_pages.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    number: Mapped[int] = mapped_column(Integer)
+    body: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(
+        String(30),
+        default="draft",
+    )
+    author_id: Mapped[UUID]
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+
+    id: Mapped[UUID] = mapped_column(
+        primary_key=True,
+        default=uuid4,
+    )
+    organization_id: Mapped[UUID] = mapped_column(index=True)
+    actor_id: Mapped[UUID]
+    action: Mapped[str] = mapped_column(String(100))
+    resource_id: Mapped[UUID]
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+
+class OutboxEvent(Base):
+    __tablename__ = "outbox_events"
+
+    id: Mapped[UUID] = mapped_column(
+        primary_key=True,
+        default=uuid4,
+    )
+    organization_id: Mapped[UUID] = mapped_column(index=True)
+    event_type: Mapped[str] = mapped_column(String(100))
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    delivered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+''',
+
+"backend/app/modules/wiki/schemas.py": r'''
+from datetime import datetime
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+class CreatePage(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    body: str = Field(min_length=1, max_length=200_000)
+
+    @field_validator("title", "body")
+    @classmethod
+    def reject_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Value must not be blank.")
+        return value
+
+
+class CreateRevision(BaseModel):
+    expected_revision: int = Field(ge=1)
+    body: str = Field(min_length=1, max_length=200_000)
+
+    @field_validator("body")
+    @classmethod
+    def reject_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Body must not be blank.")
+        return value
+
+
+class PageOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    title: str
+    head_revision: int
+    created_at: datetime
+
+
+class RevisionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    page_id: UUID
+    number: int
+    body: str
+    status: str
+    author_id: UUID
+    created_at: datetime
+''',
+
+"backend/app/modules/wiki/service.py": r'''
+from uuid import UUID
+
+from fastapi import HTTPException
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.security import Principal
+from app.models import (
+    AuditEvent,
+    OutboxEvent,
+    WikiPage,
+    WikiRevision,
+)
+from app.modules.wiki.schemas import CreatePage, CreateRevision
+
+
+def record_change(
+    session: AsyncSession,
+    principal: Principal,
+    page_id: UUID,
+    revision: WikiRevision,
+    action: str,
+) -> None:
+    payload = {
+        "page_id": str(page_id),
+        "revision_id": str(revision.id),
+        "revision_number": revision.number,
+    }
+
+    session.add(
+        AuditEvent(
+            organization_id=principal.organization_id,
+            actor_id=principal.user_id,
+            action=action,
+            resource_id=page_id,
+            payload=payload,
+        )
+    )
+
+    session.add(
+        OutboxEvent(
+            organization_id=principal.organization_id,
+            event_type=action,
+            payload=payload,
+        )
+    )
+
+
+async def create_page(
+    session: AsyncSession,
+    principal: Principal,
+    data: CreatePage,
+) -> WikiRevision:
+    async with session.begin():
+        page = WikiPage(
+            organization_id=principal.organization_id,
+            title=data.title,
+            head_revision=1,
+        )
+        session.add(page)
+        await session.flush()
+
+        revision = WikiRevision(
+            page_id=page.id,
+            number=1,
+            body=data.body,
+            author_id=principal.user_id,
+        )
+        session.add(revision)
+        await session.flush()
+
+        record_change(
+            session,
+            principal,
+            page.id,
+            revision,
+            "wiki.page.created",
+        )
+
+        await session.flush()
+        await session.refresh(revision)
+
+    return revision
+
+
+async def create_revision(
+    session: AsyncSession,
+    principal: Principal,
+    page_id: UUID,
+    data: CreateRevision,
+) -> WikiRevision:
+    async with session.begin():
+        page = await session.scalar(
+            select(WikiPage)
+            .where(
+                WikiPage.id == page_id,
+                WikiPage.organization_id == principal.organization_id,
+            )
+            .with_for_update()
+        )
+
+        if page is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Page not found",
+            )
+
+        if page.head_revision != data.expected_revision:
+            raise HTTPException(
+                status_code=409,
+                detail="Revision conflict: reload before editing",
+            )
+
+        page.head_revision += 1
+
+        revision = WikiRevision(
+            page_id=page.id,
+            number=page.head_revision,
+            body=data.body,
+            author_id=principal.user_id,
+        )
+        session.add(revision)
+        await session.flush()
+
+        record_change(
+            session,
+            principal,
+            page.id,
+            revision,
+            "wiki.revision.created",
+        )
+
+        await session.flush()
+        await session.refresh(revision)
+
+    return revision
+''',
+
+"backend/app/modules/wiki/router.py": r'''
+from typing import Annotated
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.database import get_session
+from app.core.security import Principal, get_principal
+from app.models import WikiPage, WikiRevision
+from app.modules.wiki import service
+from app.modules.wiki.schemas import (
+    CreatePage,
+    CreateRevision,
+    PageOut,
+    RevisionOut,
+)
+
+
+router = APIRouter(prefix="/wiki", tags=["wiki"])
+
+SessionDep = Annotated[AsyncSession, Depends(get_session)]
+PrincipalDep = Annotated[Principal, Depends(get_principal)]
+
+
+@router.get("/pages", response_model=list[PageOut])
+async def list_pages(
+    session: SessionDep,
+    principal: PrincipalDep,
+    before: UUID | None = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+):
+    statement = select(WikiPage).where(
+        WikiPage.organization_id == principal.organization_id
+    )
+
+    if before is not None:
+        statement = statement.where(WikiPage.id < before)
+
+    result = await session.scalars(
+        statement.order_by(WikiPage.id.desc()).limit(limit)
+    )
+    return list(result)
+
+
+@router.post("/pages", response_model=RevisionOut, status_code=201)
+async def create_page(
+    data: CreatePage,
+    session: SessionDep,
+    principal: PrincipalDep,
+):
+    return await service.create_page(session, principal, data)
+
+
+@router.post(
+    "/pages/{page_id}/revisions",
+    response_model=RevisionOut,
+    status_code=201,
+)
+async def create_revision(
+    page_id: UUID,
+    data: CreateRevision,
+    session: SessionDep,
+    principal: PrincipalDep,
+):
+    return await service.create_revision(
+        session,
+        principal,
+        page_id,
+        data,
+    )
+
+
+@router.get(
+    "/pages/{page_id}/revisions",
+    response_model=list[RevisionOut],
+)
+async def list_revisions(
+    page_id: UUID,
+    session: SessionDep,
+    principal: PrincipalDep,
+    before: Annotated[int | None, Query(ge=1)] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+):
+    page = await session.scalar(
+        select(WikiPage).where(
+            WikiPage.id == page_id,
+            WikiPage.organization_id == principal.organization_id,
+        )
+    )
+
+    if page is None:
+        raise HTTPException(status_code=404, detail="Page not found")
+
+    statement = select(WikiRevision).where(
+        WikiRevision.page_id == page_id
+    )
+
+    if before is not None:
+        statement = statement.where(WikiRevision.number < before)
+
+    result = await session.scalars(
+        statement.order_by(WikiRevision.number.desc()).limit(limit)
+    )
+    return list(result)
+''',
+
+"backend/app/main.py": r'''
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+
+from app.core.database import engine
+from app.modules.wiki.router import router as wiki_router
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    await engine.dispose()
+
+
+app = FastAPI(
+    title="LegalMind API",
+    description="法律知识库、版本化 Wiki 与证据约束问答",
+    version="0.1.0",
+    lifespan=lifespan,
+)
+
+app.include_router(wiki_router, prefix="/api/v1")
+
+
+@app.get("/health/live", tags=["health"])
+async def live():
+    return {
+        "service": "LegalMind",
+        "status": "ok",
+    }
+
+
+@app.get("/health/ready", tags=["health"])
+async def ready():
+    try:
+        async with engine.connect() as connection:
+            await connection.execute(
+                text("SELECT id FROM wiki_pages LIMIT 0")
+            )
+    except SQLAlchemyError:
+        raise HTTPException(
+            status_code=503,
+            detail="Database unavailable or migrations not applied",
+        ) from None
+
+    return {"status": "ready"}
+''',
+
+"backend/alembic.ini": r'''
+[alembic]
+script_location = %(here)s/migrations
+prepend_sys_path = .
+''',
+
+"backend/migrations/env.py": r'''
+import asyncio
+
+from alembic import context
+from sqlalchemy import pool
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from app.core.config import get_settings
+from app.core.database import Base
+from app import models  # noqa: F401
+
+
+target_metadata = Base.metadata
+database_url = get_settings().database_url
+
+
+def run_migrations_offline():
+    context.configure(
+        url=database_url,
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+        compare_type=True,
+    )
+
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+def do_run_migrations(connection):
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        compare_type=True,
+    )
+
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+async def run_async_migrations():
+    engine = create_async_engine(
+        database_url,
+        poolclass=pool.NullPool,
+    )
+
+    async with engine.connect() as connection:
+        await connection.run_sync(do_run_migrations)
+
+    await engine.dispose()
+
+
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    asyncio.run(run_async_migrations())
+''',
+
+"backend/migrations/script.py.mako": r'''
+"""${message}
+
+Revision ID: ${up_revision}
+Revises: ${down_revision | comma,n}
+"""
+
+from alembic import op
+import sqlalchemy as sa
+${imports if imports else ""}
+
+revision = ${repr(up_revision)}
+down_revision = ${repr(down_revision)}
+branch_labels = ${repr(branch_labels)}
+depends_on = ${repr(depends_on)}
+
+
+def upgrade():
+    ${upgrades if upgrades else "pass"}
+
+
+def downgrade():
+    ${downgrades if downgrades else "pass"}
+''',
+
+"backend/migrations/versions/0001_initial.py": r'''
+"""Initial Wiki, audit and outbox tables."""
+
+from alembic import op
+import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
+
+
+revision = "0001"
+down_revision = None
+branch_labels = None
+depends_on = None
+
+
+def upgrade():
+    op.create_table(
+        "wiki_pages",
+        sa.Column("id", sa.Uuid(), primary_key=True),
+        sa.Column("organization_id", sa.Uuid(), nullable=False),
+        sa.Column("title", sa.String(200), nullable=False),
+        sa.Column("head_revision", sa.Integer(), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+        sa.CheckConstraint(
+            "head_revision >= 1",
+            name="ck_wiki_page_head_positive",
+        ),
+    )
+
+    op.create_index(
+        "ix_wiki_pages_organization_id",
+        "wiki_pages",
+        ["organization_id"],
+    )
+
+    op.create_table(
+        "wiki_revisions",
+        sa.Column("id", sa.Uuid(), primary_key=True),
+        sa.Column(
+            "page_id",
+            sa.Uuid(),
+            sa.ForeignKey("wiki_pages.id", ondelete="RESTRICT"),
+            nullable=False,
+        ),
+        sa.Column("number", sa.Integer(), nullable=False),
+        sa.Column("body", sa.Text(), nullable=False),
+        sa.Column("status", sa.String(30), nullable=False),
+        sa.Column("author_id", sa.Uuid(), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+        sa.UniqueConstraint(
+            "page_id",
+            "number",
+            name="uq_wiki_revision_number",
+        ),
+        sa.CheckConstraint(
+            "number > 0",
+            name="ck_wiki_revision_positive",
+        ),
+        sa.CheckConstraint(
+            "status = 'draft'",
+            name="ck_wiki_draft_only",
+        ),
+    )
+
+    op.create_index(
+        "ix_wiki_revisions_page_id",
+        "wiki_revisions",
+        ["page_id"],
+    )
+
+    op.create_table(
+        "audit_events",
+        sa.Column("id", sa.Uuid(), primary_key=True),
+        sa.Column("organization_id", sa.Uuid(), nullable=False),
+        sa.Column("actor_id", sa.Uuid(), nullable=False),
+        sa.Column("action", sa.String(100), nullable=False),
+        sa.Column("resource_id", sa.Uuid(), nullable=False),
+        sa.Column("payload", postgresql.JSONB(), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+    )
+
+    op.create_index(
+        "ix_audit_events_organization_id",
+        "audit_events",
+        ["organization_id"],
+    )
+
+    op.create_table(
+        "outbox_events",
+        sa.Column("id", sa.Uuid(), primary_key=True),
+        sa.Column("organization_id", sa.Uuid(), nullable=False),
+        sa.Column("event_type", sa.String(100), nullable=False),
+        sa.Column("payload", postgresql.JSONB(), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+        sa.Column(
+            "delivered_at",
+            sa.DateTime(timezone=True),
+            nullable=True,
+        ),
+    )
+
+    op.create_index(
+        "ix_outbox_events_organization_id",
+        "outbox_events",
+        ["organization_id"],
+    )
+
+
+def downgrade():
+    op.drop_table("outbox_events")
+    op.drop_table("audit_events")
+    op.drop_table("wiki_revisions")
+    op.drop_table("wiki_pages")
+''',
+
+"backend/tests/test_smoke.py": r'''
+import os
+
+os.environ["APP_ENV"] = "test"
+os.environ["DATABASE_URL"] = (
+    "postgresql+asyncpg://unused:unused@localhost/unused"
+)
+os.environ["DEV_API_KEY"] = "a" * 64
+os.environ["DEV_ORG_ID"] = "11111111-1111-4111-8111-111111111111"
+os.environ["DEV_USER_ID"] = "22222222-2222-4222-8222-222222222222"
+
+import pytest  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+from pydantic import ValidationError  # noqa: E402
+
+from app.main import app  # noqa: E402
+from app.modules.wiki.schemas import CreatePage  # noqa: E402
+
+
+def test_liveness():
+    with TestClient(app) as client:
+        response = client.get("/health/live")
+
+    assert response.status_code == 200
+    assert response.json()["service"] == "LegalMind"
+
+
+def test_wiki_requires_credentials():
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/wiki/pages",
+            json={"title": "测试", "body": "草稿正文"},
+        )
+
+    assert response.status_code == 401
+
+
+def test_blank_title_is_rejected():
+    with pytest.raises(ValidationError):
+        CreatePage(title="   ", body="正文")
+''',
+
+"frontend/package.json": r'''
+{
+  "name": "legalmind-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build"
+  },
+  "dependencies": {
+    "antd": "^5.22.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "typescript": "^5.6.0",
+    "vite": "^6.0.0"
+  }
+}
+''',
+
+"frontend/Dockerfile": r'''
+FROM node:22-alpine
+
+WORKDIR /web
+
+COPY package.json ./
+RUN npm install
+
+COPY index.html tsconfig.json vite.config.ts ./
+COPY src ./src
+
+RUN npm run build
+
+USER node
+
+EXPOSE 5173
+
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+''',
+
+"frontend/index.html": r'''
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0"
+    />
+    <title>LegalMind</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+''',
+
+"frontend/tsconfig.json": r'''
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "skipLibCheck": true,
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "noEmit": true
+  },
+  "include": ["src", "vite.config.ts"]
+}
+''',
+
+"frontend/vite.config.ts": r'''
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    port: 5173,
+    proxy: {
+      "/api": "http://api:8000",
+      "/health": "http://api:8000",
+    },
+  },
+});
+''',
+
+"frontend/src/main.tsx": r'''
+import React from "react";
+import ReactDOM from "react-dom/client";
+import { ConfigProvider } from "antd";
+
+import App from "./App";
+import "./style.css";
+
+ReactDOM.createRoot(document.getElementById("root")!).render(
+  <React.StrictMode>
+    <ConfigProvider
+      theme={{
+        token: {
+          colorPrimary: "#174b70",
+          borderRadius: 6,
+        },
+      }}
+    >
+      <App />
+    </ConfigProvider>
+  </React.StrictMode>,
+);
+''',
+
+"frontend/src/App.tsx": r'''
+import { useState } from "react";
+import {
+  Alert,
+  Button,
+  Card,
+  Input,
+  List,
+  Space,
+  Typography,
+} from "antd";
+
+type Page = {
+  id: string;
+  title: string;
+  head_revision: number;
+  created_at: string;
+};
+
+type Revision = {
+  id: string;
+  page_id: string;
+  number: number;
+  body: string;
+  status: string;
+  author_id: string;
+  created_at: string;
+};
+
+export default function App() {
+  const [key, setKey] = useState("");
+  const [pages, setPages] = useState<Page[]>([]);
+  const [selected, setSelected] = useState<Page | null>(null);
+  const [revisions, setRevisions] = useState<Revision[]>([]);
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function api<T>(
+    path: string,
+    init: RequestInit = {},
+  ): Promise<T> {
+    const headers = new Headers(init.headers);
+    headers.set("X-Dev-Key", key);
+
+    if (init.body !== undefined) {
+      headers.set("Content-Type", "application/json");
+    }
+
+    const response = await fetch(`/api/v1${path}`, {
+      ...init,
+      headers,
+    });
+
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      throw new Error(
+        `${response.status}: ${
+          payload?.detail
+            ? JSON.stringify(payload.detail)
+            : response.statusText
+        }`,
+      );
+    }
+
+    return response.json() as Promise<T>;
+  }
+
+  async function execute(task: () => Promise<void>) {
+    setBusy(true);
+    setError("");
+    setNotice("");
+
+    try {
+      await task();
+    } catch (reason) {
+      setError(
+        reason instanceof Error ? reason.message : String(reason),
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function loadPages() {
+    const result = await api<Page[]>("/wiki/pages?limit=100");
+    setPages(result);
+  }
+
+  async function openPage(page: Page) {
+    const result = await api<Revision[]>(
+      `/wiki/pages/${page.id}/revisions?limit=100`,
+    );
+
+    if (!result.length) {
+      throw new Error("该页面没有可读取修订。");
+    }
+
+    setSelected({
+      ...page,
+      head_revision: result[0].number,
+    });
+    setTitle(page.title);
+    setBody(result[0].body);
+    setRevisions(result);
+  }
+
+  function newPage() {
+    setSelected(null);
+    setRevisions([]);
+    setTitle("");
+    setBody("");
+    setError("");
+    setNotice("");
+  }
+
+  async function saveDraft() {
+    if (selected) {
+      const revision = await api<Revision>(
+        `/wiki/pages/${selected.id}/revisions`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            expected_revision: selected.head_revision,
+            body,
+          }),
+        },
+      );
+
+      setSelected({
+        ...selected,
+        head_revision: revision.number,
+      });
+      setRevisions((previous) => [revision, ...previous]);
+      setNotice(`已保存为修订 ${revision.number}。`);
+    } else {
+      const revision = await api<Revision>("/wiki/pages", {
+        method: "POST",
+        body: JSON.stringify({ title, body }),
+      });
+
+      setSelected({
+        id: revision.page_id,
+        title,
+        head_revision: revision.number,
+        created_at: revision.created_at,
+      });
+      setRevisions([revision]);
+      setNotice("页面已创建，当前状态为草稿。");
+    }
+
+    await loadPages();
+  }
+
+  return (
+    <main className="container">
+      <Typography.Title>LegalMind</Typography.Title>
+      <Typography.Paragraph type="secondary">
+        法律知识库与辅助研究系统 · v0.1.0 开发基础版
+      </Typography.Paragraph>
+
+      <Alert
+        type="warning"
+        showIcon
+        message="仅供本地开发"
+        description={
+          "当前只有 Wiki 草稿与修订能力。未实现正式登录、审核发布、法律检索或 AI 问答。"
+        }
+      />
+
+      <Card title="开发身份" className="section">
+        <Space wrap>
+          <Input.Password
+            value={key}
+            onChange={(event) => {
+              setKey(event.target.value);
+              setPages([]);
+              setSelected(null);
+              setRevisions([]);
+              setTitle("");
+              setBody("");
+              setError("");
+              setNotice("");
+            }}
+            disabled={busy}
+            placeholder="输入 .env 中的 DEV_API_KEY"
+            style={{ width: 360 }}
+          />
+          <Button
+            disabled={!key || busy}
+            onClick={() => void execute(loadPages)}
+          >
+            加载页面
+          </Button>
+          <Button
+            disabled={busy}
+            onClick={() => {
+              setKey("");
+              setPages([]);
+              newPage();
+            }}
+          >
+            清除身份与页面
+          </Button>
+        </Space>
+        <Typography.Paragraph type="secondary">
+          Key 只保存在当前页面内存中，不写入浏览器存储。
+        </Typography.Paragraph>
+      </Card>
+
+      {error && (
+        <Alert
+          className="section"
+          type="error"
+          showIcon
+          message={error}
+        />
+      )}
+
+      {notice && (
+        <Alert
+          className="section"
+          type="success"
+          showIcon
+          message={notice}
+        />
+      )}
+
+      <div className="columns">
+        <Card
+          title="Wiki 页面"
+          extra={
+            <Button disabled={busy} onClick={newPage}>
+              新建
+            </Button>
+          }
+        >
+          <Typography.Paragraph type="secondary">
+            开发界面最多显示 100 页。
+          </Typography.Paragraph>
+
+          <List
+            dataSource={pages}
+            locale={{ emptyText: "请加载页面或新建草稿" }}
+            renderItem={(page) => (
+              <List.Item>
+                <Button
+                  type="link"
+                  disabled={busy}
+                  onClick={() => void execute(() => openPage(page))}
+                >
+                  {page.title}
+                </Button>
+              </List.Item>
+            )}
+          />
+        </Card>
+
+        <Card
+          title={
+            selected
+              ? `编辑草稿 · 修订 ${selected.head_revision}`
+              : "新建 Wiki 草稿"
+          }
+        >
+          <Space direction="vertical" style={{ width: "100%" }}>
+            <Input
+              placeholder="页面标题"
+              value={title}
+              disabled={busy || selected !== null}
+              onChange={(event) => setTitle(event.target.value)}
+              maxLength={200}
+            />
+
+            <Input.TextArea
+              rows={14}
+              placeholder="正文；当前按纯文本保存和展示"
+              value={body}
+              disabled={busy}
+              onChange={(event) => setBody(event.target.value)}
+              maxLength={200000}
+              showCount
+            />
+
+            <Button
+              type="primary"
+              loading={busy}
+              disabled={!key || !title.trim() || !body.trim()}
+              onClick={() => void execute(saveDraft)}
+            >
+              保存新修订
+            </Button>
+
+            <Typography.Paragraph type="secondary">
+              遇到 409 冲突时，先自行保留未保存文字，再重新打开页面。
+              当前版本不会自动合并编辑。
+            </Typography.Paragraph>
+          </Space>
+        </Card>
+      </div>
+
+      <Card title="历史修订" className="section">
+        <List
+          dataSource={revisions}
+          locale={{ emptyText: "请选择页面" }}
+          renderItem={(revision) => (
+            <List.Item>
+              <div style={{ width: "100%" }}>
+                <Typography.Text strong>
+                  修订 {revision.number} · {revision.status}
+                </Typography.Text>
+                <Typography.Paragraph type="secondary">
+                  {new Date(revision.created_at).toLocaleString()}
+                </Typography.Paragraph>
+                <pre className="revision-body">{revision.body}</pre>
+              </div>
+            </List.Item>
+          )}
+        />
+      </Card>
+    </main>
+  );
+}
+''',
+
+"frontend/src/style.css": r'''
+body {
+  margin: 0;
+  background: #f5f7fa;
+  color: #172b4d;
+  font-family: system-ui, sans-serif;
+}
+
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.section {
+  margin-top: 20px;
+}
+
+.columns {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 20px;
+  margin-top: 20px;
+}
+
+.revision-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: inherit;
+}
+
+@media (max-width: 800px) {
+  .columns {
+    grid-template-columns: 1fr;
+  }
+
+  .container {
+    padding: 12px;
+  }
+}
+''',
+
+"README.md": r'''
+# LegalMind
+
+法律知识库与辅助研究系统。
+
+## 当前版本
+
+v0.1.0：本地开发基础版，不可直接用于生产。
+
+## 已实现
+
+- FastAPI + PostgreSQL + SQLAlchemy
+- Alembic 初始迁移
+- React Wiki 草稿界面
+- Wiki 修订历史与并发冲突检测
+- 组织范围过滤
+- 同事务审计及 Outbox 写入
+
+## 未实现
+
+- 正式认证、RBAC、对象级权限
+- Wiki 审核及发布
+- 法律版本业务
+- 文档解析、检索、AI 问答
+- Outbox 消费、审计防篡改、备份恢复
+
+## 启动
+
+确认 .env 中已经设置随机密码和开发 Key，然后执行：
+
+    docker compose up --build -d
+
+前端：
+
+    http://127.0.0.1:5173
+
+API 文档：
+
+    http://127.0.0.1:8000/docs
+
+前端开发身份填写 .env 中的 DEV_API_KEY。
+
+## 测试
+
+    docker compose run --rm --no-deps api pytest
+
+这些是冒烟测试，不代表完整业务和安全测试已经通过。
+
+## 停止
+
+    docker compose down
+
+不要随意使用 down -v；它会移除项目数据库卷。
+
+## 开发限制
+
+- API 与前端仅绑定本机。
+- 当前是固定开发身份，不是多用户登录。
+- Wiki 只能保存草稿。
+- Outbox 暂不消费。
+- 审计表暂未部署数据库级防修改权限。
+- 数据库迁移与应用暂共用开发账号。
+- 当前 Compose 不构成生产安全基线。
+- 前端使用开发服务器，正式部署必须替换。
+- 接入真实资料之前，先实现权限、来源管理及备份。
+- 不应将包含敏感内容的 .env、数据库或原始文件提交仓库。
+
+## 依赖
+
+当前依赖使用范围约束，尚未生成经过验收的锁文件。
+首次安装测试后，应锁定依赖、检查许可证和已知漏洞，
+并在正式构建中使用锁文件和固定镜像摘要。
+''',
+
+"docs/architecture.md": r'''
+# LegalMind 架构基线
+
+## 核心原则
+
+1. PostgreSQL 与原始文件是权威记录。
+2. 搜索和向量索引是可重建的派生数据。
+3. 法律版本与 Wiki 修订分别建模。
+4. 模型不得直接发布知识或决定访问权限。
+5. 证据不足时追问、限定回答、拒答或转人工。
+6. 完成核验后才能发布正式答案。
+
+## 当前实现
+
+router -> service -> SQLAlchemy
+
+Wiki 的业务变更、AuditEvent、OutboxEvent 在同一个事务提交。
+现阶段 Outbox 只记录事件，不投递，不宣称已实现可靠消息消费。
+现阶段审计只保存事件，不宣称不可篡改。
+
+## 后续模块
+
+identity:
+  正式身份、会话、账号生命周期。
+
+authorization:
+  RBAC、对象权限、检索范围及权限版本。
+
+sources / documents:
+  来源、许可、文件、哈希、解析修订和原文定位。
+
+legal_corpus:
+  LegalInstrument、LegalVersion、ProvisionIdentity、
+  ProvisionVersion、ProvisionRelation、ApplicabilityRecord。
+
+retrieval:
+  精确查询、关键词查询、向量召回、融合、重排序、
+  上下文补齐和授权复核。
+
+answering:
+  问题澄清、结构化主张、引用校验、语义核验、
+  风险分流、拒答。
+
+review:
+  资料、Wiki 和高风险回答审核。
+
+evaluation:
+  人工金标准、回归测试、版本和权限专项。
+
+## 下一阶段
+
+先补正式权限，再补法律原文与版本管理。
+随后接入后台任务和检索。
+最后开放证据约束问答与 Wiki 正式发布。
+''',
+
+}
+
+
+PACKAGES = [
+    "backend/app",
+    "backend/app/core",
+    "backend/app/modules",
+    "backend/app/modules/wiki",
+    "backend/app/modules/identity",
+    "backend/app/modules/authorization",
+    "backend/app/modules/sources",
+    "backend/app/modules/documents",
+    "backend/app/modules/legal_corpus",
+    "backend/app/modules/retrieval",
+    "backend/app/modules/answering",
+    "backend/app/modules/review",
+    "backend/app/modules/evaluation",
+    "backend/app/adapters",
+    "backend/app/workers",
+]
+
+EMPTY_DIRECTORIES = [
+    "evaluations/datasets",
+    "evaluations/reports",
+    "ops/backup",
+    "ops/restore",
+]
+
+
+ROOT.mkdir()
+
+for relative_path, content in FILES.items():
+    destination = ROOT / relative_path
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(
+        dedent(content).lstrip("\n"),
+        encoding="utf-8",
+    )
+
+for package in PACKAGES:
+    directory = ROOT / package
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "__init__.py").touch()
+
+for relative_path in EMPTY_DIRECTORIES:
+    directory = ROOT / relative_path
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / ".gitkeep").touch()
+
+environment = (
+    dedent(FILES[".env.example"])
+    .lstrip("\n")
+    .replace("REPLACE_DB_PASSWORD", secrets.token_hex(32))
+    .replace("REPLACE_DEV_KEY", secrets.token_hex(32))
+)
+
+env_path = ROOT / ".env"
+env_path.write_text(environment, encoding="utf-8")
+
+try:
+    env_path.chmod(0o600)
+except OSError:
+    pass
+
+print()
+print("LegalMind project generated.")
+print(f"Directory: {ROOT.resolve()}")
+print()
+print("Next:")
+print("  cd legalmind")
+print("  docker compose up --build -d")
+print()
+print("Frontend: http://127.0.0.1:5173")
+print("API docs: http://127.0.0.1:8000/docs")
+print()
+print("Read DEV_API_KEY from legalmind/.env for local development.")
+print("Do not commit .env.")

@@ -4,7 +4,7 @@ from datetime import timedelta
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import event, select, update
 
 from app.core.security import CSRF_HEADER, SESSION_COOKIE, hash_token
 from app.models import AuditEvent, AuthSession, User
@@ -196,6 +196,35 @@ async def test_admin_cannot_manage_other_organization_users(make_client, make_us
     assert outsider.id not in {u["id"] for u in listed.json()}
     assert disable.status_code == 404
     assert roles.status_code == 404
+
+
+async def test_list_users_returns_roles_without_n_plus_one(make_client, make_user, engine):
+    admin = await make_user("system_admin")
+    organization_id = admin.organization_id
+    readers = [await make_user("reader", organization_id=organization_id) for _ in range(5)]
+
+    statements: list[str] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", record)
+    try:
+        async with make_client() as client:
+            await login(client, admin.username)
+            statements.clear()
+            response = await client.get("/api/v1/users")
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", record)
+
+    assert response.status_code == 200
+    # 角色查询应为常数：1 次鉴权（core/security.py 每请求重读当前用户角色）
+    # + 1 次列表批量查询；N+1 写法在 6 个用户下会变成 1+6=7（回归保护）
+    assert sum("user_roles" in statement for statement in statements) == 2
+    roles_by_id = {user["id"]: user["roles"] for user in response.json()}
+    assert roles_by_id[str(admin.id)] == ["system_admin"]
+    for reader in readers:
+        assert roles_by_id[str(reader.id)] == ["reader"]
 
 
 async def test_admin_cannot_lock_themselves_out(make_client, make_user):

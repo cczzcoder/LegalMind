@@ -53,18 +53,22 @@ def audit(
     )
 
 
-async def user_out(session: AsyncSession, user: User) -> UserOut:
-    roles = await session.scalars(
-        select(UserRole.role).where(UserRole.user_id == user.id).order_by(UserRole.role)
-    )
+def _to_user_out(user: User, roles: list[str]) -> UserOut:
     return UserOut(
         id=user.id,
         organization_id=user.organization_id,
         username=user.username,
         is_active=user.is_active,
-        roles=list(roles),
+        roles=roles,
         mfa_enabled=user.mfa_enabled_at is not None,
     )
+
+
+async def user_out(session: AsyncSession, user: User) -> UserOut:
+    roles = await session.scalars(
+        select(UserRole.role).where(UserRole.user_id == user.id).order_by(UserRole.role)
+    )
+    return _to_user_out(user, list(roles))
 
 
 async def recent_failures(session: AsyncSession, column, value: str) -> int:
@@ -268,9 +272,21 @@ async def set_active(
 
 
 async def list_users(session: AsyncSession, principal: Principal) -> list[UserOut]:
-    users = await session.scalars(
-        select(User)
-        .where(User.organization_id == principal.organization_id)
-        .order_by(User.username)
+    users = list(
+        await session.scalars(
+            select(User)
+            .where(User.organization_id == principal.organization_id)
+            .order_by(User.username)
+        )
     )
-    return [await user_out(session, user) for user in users]
+    # 一次查出本组织全部角色后在内存分组，避免逐个用户查询（N+1）
+    role_rows = await session.execute(
+        select(UserRole.user_id, UserRole.role)
+        .join(User, User.id == UserRole.user_id)
+        .where(User.organization_id == principal.organization_id)
+        .order_by(UserRole.user_id, UserRole.role)
+    )
+    roles_by_user: dict[UUID, list[str]] = {}
+    for user_id, role in role_rows:
+        roles_by_user.setdefault(user_id, []).append(role)
+    return [_to_user_out(user, roles_by_user.get(user.id, [])) for user in users]

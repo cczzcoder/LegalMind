@@ -18,6 +18,7 @@ LegalMind：准确性优先、可追溯的法律知识库与辅助研究系统�
 docker compose up --build -d                  # 启动全部服务
 docker compose run --rm --no-deps api pytest  # 运行后端测试
 docker compose logs -f api                    # 查看 API 日志
+docker compose exec api python -m app.cli run-worker   # 按需启动后台 worker（解析等；--once 只处理一个）
 docker compose down                           # 停止（不要随意加 -v，会删除数据库卷）
 ```
 
@@ -45,6 +46,7 @@ export DATABASE_URL="postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@
 .venv/Scripts/python.exe -m app.cli restore --src /path/to/backups/<label> --dry-run   # 先 dry-run 校验
 .venv/Scripts/python.exe -m app.cli restore --src /path/to/backups/<label>             # 正式恢复
 .venv/Scripts/python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+.venv/Scripts/python.exe -m app.cli run-worker   # 后台 worker（另开一个终端；导入只登记任务，不启动则不解析）
 .venv/Scripts/python.exe -m pytest
 ```
 

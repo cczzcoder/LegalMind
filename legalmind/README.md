@@ -6,12 +6,12 @@
 
 v0.1.0：本地开发基础版，不可直接用于生产。
 
-当前实现覆盖设计实施阶段 P0–P2，P3 已开始：需求阶段 A 已完成；阶段 B 的 P2（认证授权、文件存储、备份恢复）已完成；P3 的数据模型已完整建立（原文定位 0007、法律版本树 0008、条款关系与适用性 0009），解析器与检索尚未实现；P4、P5 尚未开始；阶段 C 未开始。进度口径见《系统设计文档》17.2。
+当前实现覆盖设计实施阶段 P0–P2，P3 已开始：需求阶段 A 已完成；阶段 B 的 P2（认证授权、文件存储、备份恢复）已完成；P3 的数据模型已完整建立（原文定位 0007、法律版本树 0008、条款关系与适用性 0009），**第 1 层解析器、法律结构识别、后台 worker 与法律版本落库已实现**（`app/modules/parsing/` 解析结果经入库前脱敏后写入 `parse_revisions` / `chunks` / `chunk_spans`；`app/modules/legal_corpus/` 识别 编/章/节/条、对齐分块并挂到 `legal_instruments` / `legal_versions` / `provision_identities` / `provision_versions`；`app/workers/` 消费 `document.parse` 任务），"导入 → 解析 → 入库 → 挂版本"已闭环；精确检索尚未实现；P4、P5 尚未开始；阶段 C 未开始。进度口径见《系统设计文档》17.2。
 
 ## 已实现
 
 - FastAPI + PostgreSQL + SQLAlchemy
-- Alembic 迁移（0001 Wiki/审计/Outbox，0002 身份与会话，0003 MFA 与页面授权，0004 来源/原件/任务，0005 审计索引，0006 业务表外键，0007 解析版本/分块/原文定位，0008 法律版本/条款，0009 条款关系/适用性，0010 公共数据表去组织字段，0011 来源/原件/任务去组织字段，0012 脱敏映射表）
+- Alembic 迁移（0001 Wiki/审计/Outbox，0002 身份与会话，0003 MFA 与页面授权，0004 来源/原件/任务，0005 审计索引，0006 业务表外键，0007 解析版本/分块/原文定位，0008 法律版本/条款，0009 条款关系/适用性，0010 公共数据表去组织字段，0011 来源/原件/任务去组织字段，0012 脱敏映射表，0013 版本效力状态与本体身份键）
 - React 登录页、MFA 绑定/验证与 Wiki 草稿界面
 - Wiki 修订历史与并发冲突检测
 - 用户名密码登录（Argon2id）、PostgreSQL 服务端会话、CSRF 防护
@@ -23,9 +23,16 @@ v0.1.0：本地开发基础版，不可直接用于生产。
   knowledge_admin 管理授权名单，但管理授权不等于可阅读内容
 - 可信代理：仅信任 TRUSTED_PROXIES 中的代理传来的 X-Forwarded-For
 - 同事务审计及 Outbox 写入；登录、退出、MFA、用户与角色、页面授权变更写审计
-- 来源登记（FR-01）：来源类型、可信等级、授权说明、最后核查时间
+- 来源登记（FR-01）：来源类型、可信等级、授权说明、最后核查时间；来源登记信息与原件来源归属均可更正（`PUT /sources/{id}`、`PUT /documents/{id}/source` 与对应 CLI，需 source.manage，变更写审计含前后值——§20.3 要求来源更新留痕；授权说明不允许清空）
+- 撤下原件（设计 15.3）：**整批**删除原件、解析版本、分块、定位与脱敏映射，取消其尚未开始的解析任务，清理因版本删除而孤立的条款身份（`app.cli withdraw-document`，支持 `--from-source` 按来源整批、`--dry-run` 预演）；同一版本还有合法来源原件时自动从它重建版本树，没有的才连同法律本体一并删除。用于来源被认定无权使用的情形（需 source.manage，操作写审计并记录对象键）
 - 原始文件导入与下载（FR-02）：流式上传限流、压缩炸弹/宏/PDF 主动内容检查、原子写盘加哈希校验；文档级授权与页面级授权共用 AccessGrant
 - 备份与恢复：`app.cli backup` / `restore`，含原件清单与 SHA-256 校验、恢复前冲突检查与 dry-run
+- 文档解析（第 1 层，设计 2、6）：`DocumentParser` 接口 + 原生实现——PDF 后端锁定 pypdfium2（pdfplumber 可切换）、DOCX（python-docx）、HTML（lxml）、纯文本；解析结果落库为 `parse_revisions` / `chunks` / `chunk_spans`，审计与 Outbox 同事务；块级定位（页序号、字符偏移、归一化 bbox）
+- 解析入库前脱敏（设计 21.3）：`chunks.text` 存脱敏文本、原文本不落库（由映射表可逆重建）、`chunk_spans` 偏移仍指向原文本；映射与分块、审计同事务
+- 法律结构识别（设计 5.2、6、7）：识别 编/章/节/条 四级、排除「目录」重复标题，**分块对齐到「条」**并把章节路径写入 `chunks.structure_path`；16 份真实法律文本上条号连续、无识别异常
+- 法律版本落库（设计 5.1、5.2、7、8.3）：解析后自动挂到法律本体/版本/条款身份/条款版本；本体身份为「法域 + 规范化名称」；版本标识与效力状态取自正文公布信息、文件名仅作回退；**低置信度置 `review_status='pending'` 待人工复核**（目前无待审队列/界面）；同一版本多原件按「效力状态 > 公布日期 > 导入时间 > docx 优于 pdf」择优并做效力状态证据合并，**来源不同才算冲突**（同一来源的两种格式不算）。16 份真实样本实测：13 个本体、14 个版本、2207 个条款身份、2345 个条款版本
+- 后台任务 worker（设计 3.1、12.2）：单进程单并发、按需启动（`python -m app.cli run-worker`）；`FOR UPDATE SKIP LOCKED` 原子领取、租约与心跳、租约过期回收重试、指数退避、失败分类（资源不足记 `resource_exhausted`，不伪装成业务结果）
+- 解析内存防护（设计 14.2）：逐页处理并及时释放，字节/页数/字符数硬上限 + 进程内存增长守卫，超限主动中止
 - 业务表统一外键（设计 5.3）：organization_id 与"人"引用列（created_by / author_id / granted_by / actor_id），ondelete 一律 RESTRICT
 - 前端静态检查：eslint + prettier（`npm run lint` / `npm run format:check`）
 - CI（GitHub Actions）：push 与 PR 自动跑后端 lint / 迁移漂移检查 / 测试，以及前端 lint / 构建
@@ -34,8 +41,10 @@ v0.1.0：本地开发基础版，不可直接用于生产。
 
 - 来源登记、文件导入下载与授权名单的前端管理界面（目前均通过 API）
 - Wiki 审核及发布
-- 法律版本业务
-- 文档解析、检索、AI 问答
+- 法律版本的人工复核界面与待审队列（落库已实现，`review_status='pending'` 目前只能用 SQL 查）
+- 版本效力状态的定期重算（「已公布未生效」到期转有效、旧版本随之被取代，目前只在落库时算一次）
+- OCR（第 2 层）与结构化版面（第 3 层 Docling，暂缓）
+- 检索、AI 问答
 - Outbox 消费、审计防篡改
 
 ## 启动
@@ -62,6 +71,23 @@ v0.1.0：本地开发基础版，不可直接用于生产。
     GET    /api/v1/wiki/pages/{page_id}/grants
     PUT    /api/v1/wiki/pages/{page_id}/grants/{user_id}
     DELETE /api/v1/wiki/pages/{page_id}/grants/{user_id}
+
+更正已导入原件的来源归属，以及更正来源登记信息（均需 source.manage，变更写审计）：
+
+    PUT    /api/v1/documents/{document_id}/source          {"source_id": "<目标来源 ID>"}
+    PUT    /api/v1/sources/{source_id}                     {"publisher": "...", "license_note": "..."}
+    docker compose exec api python -m app.cli set-document-source --as kadmin --document <原件 ID> --source <目标来源 ID>
+    docker compose exec api python -m app.cli update-source --as kadmin --source <来源 ID> --url <URL> --publisher <发布方>
+
+撤下原件（不可逆；先 `--dry-run` 预演，确认后去掉；用于来源被认定无权使用的情形，设计 §15.3）：
+
+    docker compose exec api python -m app.cli withdraw-document --as kadmin --document <原件 ID> --reason "原因" --dry-run
+    docker compose exec api python -m app.cli withdraw-document --as kadmin --from-source <来源 ID> --reason "原因"
+
+后台任务 worker（按需启动；导入只登记任务，不启动 worker 时任务一直停在 pending）：
+
+    docker compose exec api python -m app.cli run-worker            # 持续处理
+    docker compose exec api python -m app.cli run-worker --once     # 只处理一个任务
 
 前端：
 
@@ -115,6 +141,15 @@ CI（`.github/workflows/ci.yml`）在 push 与 PR 上跑同一套门禁。
 - 当前 Compose 不构成生产安全基线。
 - 前端使用开发服务器，正式部署必须替换。
 - 接入真实资料前须先确认来源授权说明与数据分级（需求 2.2）。
+- 解析只实现了第 1 层（原生）；扫描件（无文本层）标记 `needs_review`，OCR 就位前不得作为证据来源。
+- PDF 后端已锁定 pypdfium2（样本基准：与 pdfplumber 文本逐字节一致、定位均满足设计 6 的精度要求、快约 5 倍）；`PARSING_PDF_BACKEND=pdfplumber` 可切换，切换会新建解析版本（基准脚本：`backend/scripts/benchmark_parsers.py`）。
+- 脱敏只覆盖正则可识别的身份证号、案号、联系方式；**姓名类实体需 NER**，就位前不得把解析产物作为对外发布内容。
+- 后台 worker 为**单进程单并发**，不要并发起多个；worker 被强杀不丢任务（租约过期后回收重试），但取消只作用于尚未开始的任务。
+- 印刷页码暂不检测（存 NULL）。
+- 结构识别只覆盖 编/章/节/条；**款/项/目 未建模**，**条款身份只覆盖「条」**（章/节号随上级重置）。
+- 法律版本元数据（名称、文号、版本标识、效力状态）来自**正文前言的启发式提取**，没有人工确认环节：低置信度只置 `review_status='pending'` 并写审计，**目前没有待审队列或界面**；`review_status='approved'` 是**自动确认**，不等于人工复核。
+- 效力状态在**落库时**计算一次；时间推进导致的状态变化（「已公布未生效」到期转有效、旧版本随之被取代）不会自动更新，需重新关联或补定期重算。
+- `legal_status` 尚未参与任何检索过滤（检索层未实现）；实现检索时须按设计文档 §8.3 默认屏蔽 `not_yet_effective`，不得把尚未生效的法律当作现行依据。
 - 不应将包含敏感内容的 .env、数据库或原始文件提交仓库。
 
 ## 依赖
@@ -122,3 +157,5 @@ CI（`.github/workflows/ci.yml`）在 push 与 PR 上跑同一套门禁。
 当前依赖使用范围约束，尚未生成经过验收的锁文件。
 首次安装测试后，应锁定依赖、检查许可证和已知漏洞，
 并在正式构建中使用锁文件和固定镜像摘要。
+
+第 1 层解析依赖均为宽松许可、纯 CPU、不联网：pdfplumber（MIT）、pypdfium2（Apache-2.0 / BSD-3-Clause）、python-docx（MIT）、lxml（BSD-3-Clause）。

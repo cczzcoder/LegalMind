@@ -121,7 +121,7 @@ await to_thread.run_sync(storage.put, key, content, sha256)
 ## `[NIT]`
 
 - `models.py` 中多数 `organization_id` 只有索引、无外键（仅 `User.organization_id` 有外键），风格不一致。
-- `ruff format` 显示 13 个文件待格式化（既有）。
+- ~~`ruff format` 显示 13 个文件待格式化（既有）。~~ **已修复（2026-10-03，16c498a）**：实测 12 个文件已格式化，`ruff format` 已作为后端格式基线引入（`ruff check` + `ruff format --check` 均纳入门禁）。
 - 前端无 eslint / prettier / 测试。
 
 ---

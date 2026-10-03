@@ -134,6 +134,7 @@
 ```bash
 # 后端（在 legalmind/backend 下，使用 .venv/Scripts/python.exe）
 ruff check .
+ruff format --check .        # 格式基线（2026-10-03 引入）
 pytest                       # 设 TEST_DATABASE_URL 才会跑集成测试
 
 # 前端（在 legalmind/frontend 下）
@@ -144,7 +145,6 @@ npm run build                # 内含 tsc --noEmit
 
 | 项 | 作用 | 说明 |
 | --- | --- | --- |
-| `ruff format` | 统一后端格式 | 现状：13 个文件待格式化（既有，非本次引入） |
 | pre-commit | 提交前自动跑 lint/format | 开发机钩子，防止脏代码进 PR |
 | CI（GitHub Actions） | 每个 PR 自动跑 lint + 测试 | 仓库当前**无 CI**，是最大缺口 |
 | eslint + prettier | 前端静态检查 | 当前前端**无 lint、无测试** |
@@ -226,8 +226,8 @@ npm run build                # 内含 tsc --noEmit
 
 | 项 | 现状 | 差距 |
 | --- | --- | --- |
-| 后端 lint | `ruff check` 通过 | 无 `ruff format` 门禁（13 文件待格式化） |
-| 后端测试 | 104 项通过（含集成、权限矩阵） | 无覆盖率要求 |
+| 后端 lint | `ruff check` + `ruff format --check` 通过 | 无 CI 自动执行（仅本地） |
+| 后端测试 | 107 项通过（含集成、权限矩阵） | 无覆盖率要求 |
 | 前端 | `tsc --noEmit` + build | **无 eslint/prettier、无测试** |
 | CI | **无** | 最大缺口 |
 | 提交钩子 | **无** | 无 pre-commit |

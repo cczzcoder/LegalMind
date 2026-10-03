@@ -21,7 +21,7 @@ docker compose logs -f api                    # 查看 API 日志
 docker compose down                           # 停止（不要随意加 -v，会删除数据库卷）
 ```
 
-Lint 使用 ruff（配置见 `backend/pyproject.toml`）。
+Lint 与格式化使用 ruff（配置见 `backend/pyproject.toml`）：`ruff check .` 与 `ruff format .`；提交前保证 `ruff format --check .` 通过。
 
 ### 本机开发（数据库在 Docker，API 在本机）
 

@@ -19,6 +19,7 @@
 ```bash
 # 后端
 ruff check .
+ruff format --check .
 pytest                      # 是否设置了 TEST_DATABASE_URL？集成测试是否真的跑了？
 
 # 前端

@@ -215,7 +215,10 @@ async def test_restricted_document_hidden_until_granted(make_client, make_user, 
 
     assert owner_view.status_code == 200
     assert before == (404, 404, 404, False)
-    assert missing.json() == {"detail": "Document not found"}
+    missing_body = missing.json()
+    assert missing_body["code"] == "not_found"
+    assert missing_body["message"] == "Document not found"
+    assert missing_body["trace_id"]
     assert granted.status_code == 200
     assert during == (200, 200, 200, True)
     assert revoked.status_code == 204

@@ -87,6 +87,8 @@ export default function App() {
 
     if (!response.ok) {
       const payload = await response.json().catch(() => null);
+      // 服务端统一错误体为 { code, message, trace_id }；detail 是旧格式的兜底
+      const message = payload?.message ?? payload?.detail;
 
       if (response.status === 401 && path !== "/auth/login") {
         clearWorkspace();
@@ -94,9 +96,7 @@ export default function App() {
 
       throw new Error(
         `${response.status}: ${
-          payload?.detail
-            ? JSON.stringify(payload.detail)
-            : response.statusText
+          message ? String(message) : response.statusText
         }`,
       );
     }

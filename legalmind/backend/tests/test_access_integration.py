@@ -49,7 +49,9 @@ async def test_restricted_page_hidden_from_others(make_client, make_user):
     assert page_id not in other_list
     # 无权访问与不存在不可区分
     assert history.status_code == edit.status_code == missing.status_code == 404
-    assert history.json() == missing.json()
+    # trace_id 每个请求都不同，只比较与存在性相关的字段
+    assert history.json()["code"] == missing.json()["code"] == "not_found"
+    assert history.json()["message"] == missing.json()["message"]
 
 
 async def test_grant_and_revoke_take_effect_immediately(make_client, make_user):

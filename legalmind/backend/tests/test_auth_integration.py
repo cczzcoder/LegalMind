@@ -40,7 +40,9 @@ async def test_wrong_password_and_unknown_user_look_the_same(make_client, make_u
         unknown = await login(client, f"nobody-{uuid4().hex[:8]}")
 
     assert wrong.status_code == unknown.status_code == 401
-    assert wrong.json() == unknown.json()
+    # trace_id 每个请求都不同，只比较与账号存在性相关的字段
+    assert wrong.json()["code"] == unknown.json()["code"]
+    assert wrong.json()["message"] == unknown.json()["message"]
     assert SESSION_COOKIE not in wrong.headers.get("set-cookie", "")
 
 

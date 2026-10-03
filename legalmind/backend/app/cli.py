@@ -173,6 +173,15 @@ def _pg_env_and_args(database_url: str) -> tuple[dict, list[str]]:
     return env, args
 
 
+def _exit_missing_pg_tool(tool: str):
+    """pg_dump / pg_restore 不在 PATH 时给出可操作的提示，而不是裸的 FileNotFoundError。"""
+    sys.exit(
+        f"未找到 {tool}：备份与恢复依赖 PostgreSQL 客户端工具。\n"
+        f"  请安装与数据库服务器同版本的客户端工具（pg_dump / pg_restore）并加入 PATH；\n"
+        f"  若数据库运行在 Docker 中，可改用容器内的 pg_dump/pg_restore，见 CLAUDE.md「本机开发」。"
+    )
+
+
 def do_backup(dest: Path, label: str | None, settings=None) -> None:
     if settings is None:
         from app.core.config import get_settings  # 延迟导入，避免在测试中触发 DB 验证
@@ -191,13 +200,17 @@ def do_backup(dest: Path, label: str | None, settings=None) -> None:
     dump_path = backup_dir / "db.dump"
 
     print(f"导出数据库 → {dump_path} …")
-    result = subprocess.run(
-        ["pg_dump", "--format=custom", "-f", str(dump_path)] + conn_args + [db_name],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["pg_dump", "--format=custom", "-f", str(dump_path)] + conn_args + [db_name],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        shutil.rmtree(backup_dir, ignore_errors=True)
+        _exit_missing_pg_tool("pg_dump")
     if result.returncode != 0:
         shutil.rmtree(backup_dir, ignore_errors=True)
         sys.exit(f"pg_dump 失败:\n{result.stderr}")
@@ -308,15 +321,18 @@ def do_restore(
     env, conn_args = _pg_env_and_args(db_url)
     db_name = urlparse(db_url.replace("+asyncpg", "")).path.lstrip("/")
     print(f"恢复数据库 {db_name!r} …")
-    result = subprocess.run(
-        ["pg_restore", "--clean", "--if-exists", "-d", db_name]
-        + conn_args
-        + [str(src / "db.dump")],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["pg_restore", "--clean", "--if-exists", "-d", db_name]
+            + conn_args
+            + [str(src / "db.dump")],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        _exit_missing_pg_tool("pg_restore")
     # pg_restore 仅当 exit > 1 时才是真实错误（exit 1 可能只是警告）
     if result.returncode > 1:
         sys.exit(f"pg_restore 失败 (exit {result.returncode}):\n{result.stderr}")

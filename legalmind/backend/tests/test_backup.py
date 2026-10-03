@@ -131,6 +131,23 @@ def test_backup_fails_if_dest_already_exists(tmp_path):
         do_backup(dest, "dup", settings=settings)
 
 
+def test_backup_reports_missing_pg_dump(tmp_path, storage_with_files):
+    """宿主机没有 pg_dump 时（本机开发常见）给出可操作提示，并清理半成品目录。"""
+    storage_root, _ = storage_with_files
+    settings = _make_settings(tmp_path)
+    settings.storage_root = str(storage_root)
+
+    dest = tmp_path / "backups"
+    with (
+        patch("app.cli.subprocess.run", side_effect=FileNotFoundError),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        do_backup(dest, "lbl", settings=settings)
+
+    assert "pg_dump" in str(exc_info.value)
+    assert not (dest / "lbl").exists()
+
+
 # ---------------------------------------------------------------------------
 # do_restore：哈希校验与 dry-run
 # ---------------------------------------------------------------------------
@@ -287,3 +304,18 @@ def test_restore_fails_on_missing_backup_meta(tmp_path, valid_backup):
     (backup_dir / "backup_meta.json").unlink()
     with pytest.raises(SystemExit):
         do_restore(backup_dir, db_url, str(tmp_path / "storage"), dry_run=True, settings=settings)
+
+
+def test_restore_reports_missing_pg_restore(tmp_path, valid_backup):
+    """宿主机没有 pg_restore 时给出可操作提示，而不是裸的 FileNotFoundError。"""
+    backup_dir, _, db_url = valid_backup
+    storage_root = tmp_path / "storage"
+    settings = _make_settings(tmp_path)
+
+    with (
+        patch("app.cli.subprocess.run", side_effect=FileNotFoundError),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        do_restore(backup_dir, db_url, str(storage_root), dry_run=False, settings=settings)
+
+    assert "pg_restore" in str(exc_info.value)

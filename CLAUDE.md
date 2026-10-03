@@ -48,6 +48,14 @@ export DATABASE_URL="postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@
 .venv/Scripts/python.exe -m pytest
 ```
 
+`backup` / `restore` 依赖宿主机的 `pg_dump` / `pg_restore`，且版本需与数据库服务器一致。本机开发时数据库跑在 Docker 容器里、宿主机通常没有这两个命令，`app.cli backup` 会直接报错并给出提示。此时若只需备份数据库：
+
+```bash
+docker compose exec -T postgres pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom > /path/to/db.dump
+```
+
+注意这只含数据库，**不含原始文件**（原始文件在 `artifacts_data` 卷内，需一并备份）。
+
 系统不开放注册，用户只能由 CLI 或管理员通过 `/api/v1/users` 创建。system_admin、knowledge_admin 登录后须先完成 TOTP（需在 `.env` 设置 `MFA_ENCRYPTION_KEY`）。
 
 集成测试（`tests/test_*_integration.py`、`tests/test_permission_matrix.py`）连接独立的 `legalmind_test` 库，未设置 `TEST_DATABASE_URL` 时自动跳过。测试库首次需手动创建，测试会自动迁移：

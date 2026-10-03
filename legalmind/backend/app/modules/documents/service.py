@@ -4,6 +4,7 @@
 事务失败时删除刚写入的文件，数据库中不会出现指向缺失文件的记录。
 """
 
+import asyncio
 import hashlib
 from datetime import datetime
 from uuid import UUID
@@ -63,7 +64,7 @@ async def import_document(
         raise HTTPException(status_code=409, detail="Document already imported")
 
     key = storage.new_key()
-    storage.put(key, content, sha256)
+    await asyncio.to_thread(storage.put, key, content, sha256)
 
     try:
         async with session.begin():
@@ -119,10 +120,10 @@ async def import_document(
             await session.refresh(artifact)
             await session.refresh(job)
     except IntegrityError:
-        storage.delete(key)
+        await asyncio.to_thread(storage.delete, key)
         raise HTTPException(status_code=409, detail="Document already imported") from None
     except BaseException:
-        storage.delete(key)
+        await asyncio.to_thread(storage.delete, key)
         raise
 
     return artifact, job
@@ -173,7 +174,7 @@ async def read_content(
     async with session.begin():
         artifact = await get_visible_document(session, principal, document_id)
         try:
-            content = storage.open(artifact.object_key)
+            content = await asyncio.to_thread(storage.open, artifact.object_key)
         except FileNotFoundError:
             raise HTTPException(status_code=503, detail="Original file unavailable") from None
 

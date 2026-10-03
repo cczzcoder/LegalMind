@@ -25,6 +25,22 @@ class Settings(BaseSettings):
     storage_root: str = "data/artifacts"
     max_upload_bytes: int = 50 * 1024 * 1024
 
+    # 解析（设计 6、7、14.2）。PDF 双后端可互换；选型待样本基准按 §6 精度要求拍板
+    parsing_pdf_backend: Literal["pypdfium2", "pdfplumber"] = "pypdfium2"
+    # 单次解析的资源上限，超限主动拒绝/中止，避免 16 GB 单机 OOM
+    parse_max_bytes: int = 50 * 1024 * 1024
+    parse_max_pages: int = 2000
+    parse_max_chars: int = 5_000_000
+    # 解析期间进程内存增长预算（MB）；<=0 表示不限制
+    parse_memory_budget_mb: int = 1024
+
+    # 后台任务 worker（设计 12.2、14.2）：单并发、按需启动，任务结束即释放资源
+    worker_lease_seconds: int = 300
+    worker_poll_seconds: float = 5.0
+    # 失败重试的指数退避：base * 2^(attempt-1)，封顶 max
+    worker_backoff_base_seconds: int = 30
+    worker_backoff_max_seconds: int = 900
+
     @field_validator("mfa_encryption_key", mode="before")
     @classmethod
     def empty_key_is_unset(cls, value):

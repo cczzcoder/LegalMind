@@ -18,6 +18,11 @@ dependencies = [
     "argon2-cffi==25.1.0",
     "pyotp==2.10.0",
     "cryptography==50.0.2",
+    # 第 1 层原生解析（设计 §2）：纯 CPU、零外发、许可宽松（MIT / Apache-2.0 / BSD-3-Clause）
+    "pdfplumber>=0.11,<0.12",
+    "pypdfium2>=4.30,<5",
+    "python-docx>=1.1,<2",
+    "lxml>=5,<7",
 ]
 
 [project.optional-dependencies]

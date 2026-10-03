@@ -1,7 +1,7 @@
 """集成测试共用的登录、MFA 与数据构造辅助函数。"""
 
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pyotp
@@ -133,3 +133,119 @@ async def create_page(client: httpx.AsyncClient, **extra):
         "/api/v1/wiki/pages",
         json={"title": "测试页面", "body": "正文", **extra},
     )
+
+
+async def setup_source(make_client, make_user) -> tuple:
+    """新建组织与来源，返回 (知识管理员, 编辑, 来源 ID)。来源登记需 knowledge_admin。"""
+    admin = await make_user("knowledge_admin")
+    editor = await make_user("editor", organization_id=admin.organization_id)
+    async with make_client() as client:
+        await login(client, admin.username)
+        # 来源名全库唯一（设计 21.2）；测试用唯一名避免互相冲突
+        response = await client.post(
+            "/api/v1/sources",
+            json={
+                "name": f"国家法律法规数据库-{uuid4().hex[:8]}",
+                "source_type": "official",
+                "trust_level": "high",
+                "url": "https://flk.npc.gov.cn",
+                "license_note": "官方公开发布的法律法规文本",
+            },
+        )
+    assert response.status_code == 201, response.text
+    return admin, editor, response.json()["id"]
+
+
+async def import_document_into_source(
+    make_client, editor, source_id, content: bytes, filename: str
+) -> UUID:
+    """在**已登记**的来源下导入一个原件，返回原件 ID（用于构造「同来源多份原件」的场景）。"""
+    async with make_client() as client:
+        await login(client, editor.username)
+        imported = await client.post(
+            "/api/v1/documents",
+            params={"source_id": source_id, "filename": filename, "sensitivity": "public"},
+            content=content,
+            headers={"Content-Type": "application/octet-stream"},
+        )
+    assert imported.status_code == 202, imported.text
+    return UUID(imported.json()["document"]["id"])
+
+
+async def import_document_for_parsing(
+    make_client, make_user, content: bytes, filename: str
+) -> tuple:
+    """登记来源并导入一个原件，返回 (导入者, 原件 ID)。
+
+    原件按 sha256 全库唯一（设计 21.2），调用方须保证 ``content`` 每次不同。
+    """
+    _, editor, source_id = await setup_source(make_client, make_user)
+    document_id = await import_document_into_source(
+        make_client, editor, source_id, content, filename
+    )
+    return editor, document_id
+
+
+def build_minimal_pdf(pages: list[list[str]], *, marker: str | None = None) -> bytes:
+    """构造一个最小可解析 PDF：每页若干行 Helvetica 文本，交叉引用表偏移正确。
+
+    纯内置实现，不引入额外依赖；内容确定，便于断言定位字段。仅用于测试。
+
+    ``marker`` 会作为 PDF 内容流注释写入首页——解析器忽略注释，但字节随之变化，
+    便于让原件 sha256 在测试间保持唯一（设计 §21.2 要求原件全库唯一）。
+    """
+    objects: list[bytes] = []
+
+    def add(body: bytes) -> int:
+        objects.append(body)
+        return len(objects)  # 1 基对象号
+
+    add(b"<< /Type /Catalog /Pages 2 0 R >>")
+    add(b"")  # /Pages 占位，最后回填
+    add(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+
+    kids: list[int] = []
+    for page_index, lines in enumerate(pages):
+        content = "BT\n/F1 24 Tf\n24 TL\n72 700 Td\n"
+        for index, line in enumerate(lines):
+            if index:
+                content += "T*\n"
+            escaped = line.replace("\\", r"\\").replace("(", r"\(").replace(")", r"\)")
+            content += f"({escaped}) Tj\n"
+        content += "ET\n"
+        if marker and page_index == 0:
+            content += f"% {marker}\n"
+        stream = content.encode("latin-1")
+        content_number = add(
+            b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"endstream"
+        )
+        page_number = add(
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Resources << /Font << /F1 3 0 R >> >> /Contents "
+            + str(content_number).encode()
+            + b" 0 R >>"
+        )
+        kids.append(page_number)
+
+    objects[1] = (
+        b"<< /Type /Pages /Kids ["
+        + b" ".join(f"{kid} 0 R".encode() for kid in kids)
+        + b"] /Count "
+        + str(len(kids)).encode()
+        + b" >>"
+    )
+
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += f"{number} 0 obj\n".encode() + body + b"\nendobj\n"
+
+    xref = len(out)
+    out += f"xref\n0 {len(objects) + 1}\n".encode() + b"0000000000 65535 f \n"
+    for offset in offsets:
+        out += f"{offset:010d} 00000 n \n".encode()
+    out += (
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
+    ).encode()
+    return bytes(out)

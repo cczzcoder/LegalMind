@@ -10,18 +10,15 @@ import sqlalchemy as sa
 
 from app.core.security import hash_password
 from app.models import (
-    Chunk,
     ChunkSpan,
     LegalInstrument,
     Organization,
-    ParseRevision,
     ProvisionIdentity,
     ProvisionRelation,
-    Source,
-    SourceArtifact,
     User,
     WikiPage,
 )
+from tests.helpers import seed_parse_chain, sha256_hex
 
 pytestmark = pytest.mark.anyio
 
@@ -57,73 +54,9 @@ EXPECTED_FOREIGN_KEYS = (
     ("applicability_records", "provision_identity_id", "provision_identities"),
     ("applicability_records", "confirmed_by", "users"),
     ("applicability_records", "created_by", "users"),
+    ("redaction_entities", "parse_revision_id", "parse_revisions"),
+    ("redaction_entities", "created_by", "users"),
 )
-
-
-def _sha256() -> str:
-    return uuid4().hex + uuid4().hex
-
-
-async def _seed_parse_chain(session) -> Chunk:
-    """建一条 org → user → source → artifact → parse_revision → chunk 的合法链路。"""
-    organization = Organization(name=f"org-{uuid4()}")
-    session.add(organization)
-    await session.flush()
-
-    user = User(
-        organization_id=organization.id,
-        username=f"u-{uuid4().hex[:12]}",
-        password_hash=hash_password("test-password"),
-        is_active=True,
-    )
-    session.add(user)
-    await session.flush()
-
-    source = Source(
-        name=f"src-{uuid4().hex[:8]}",
-        source_type="official",
-        trust_level="high",
-        license_note="测试来源",
-        created_by=user.id,
-    )
-    session.add(source)
-    await session.flush()
-
-    artifact = SourceArtifact(
-        source_id=source.id,
-        object_key=uuid4().hex + uuid4().hex,
-        sha256=_sha256(),
-        size_bytes=1024,
-        media_type="application/pdf",
-        original_filename="example.pdf",
-        sensitivity="internal",
-        access_scope="organization",
-        created_by=user.id,
-    )
-    session.add(artifact)
-    await session.flush()
-
-    parse_revision = ParseRevision(
-        artifact_id=artifact.id,
-        parser="test-parser",
-        parser_version="1",
-        config_version="v1",
-        text_sha256=_sha256(),
-        quality_status="ok",
-        created_by=user.id,
-    )
-    session.add(parse_revision)
-    await session.flush()
-
-    chunk = Chunk(
-        parse_revision_id=parse_revision.id,
-        ordinal=0,
-        text="第一条 测试条文",
-        text_sha256=_sha256(),
-    )
-    session.add(chunk)
-    await session.flush()
-    return chunk
 
 
 async def test_business_tables_enforce_foreign_keys(engine):
@@ -159,14 +92,14 @@ async def test_orphan_organization_is_rejected(session_factory):
 
 async def test_chunk_span_rejects_inverted_char_range(session_factory):
     async with session_factory() as session:
-        chunk = await _seed_parse_chain(session)
+        *_, chunk = await seed_parse_chain(session)
         session.add(
             ChunkSpan(
                 chunk_id=chunk.id,
                 ordinal=0,
                 char_start=10,
                 char_end=10,
-                text_sha256=_sha256(),
+                text_sha256=sha256_hex(),
             )
         )
         with pytest.raises(sa.exc.IntegrityError):
@@ -176,7 +109,7 @@ async def test_chunk_span_rejects_inverted_char_range(session_factory):
 
 async def test_chunk_span_rejects_bbox_without_coordinate_system(session_factory):
     async with session_factory() as session:
-        chunk = await _seed_parse_chain(session)
+        *_, chunk = await seed_parse_chain(session)
         session.add(
             ChunkSpan(
                 chunk_id=chunk.id,
@@ -184,7 +117,7 @@ async def test_chunk_span_rejects_bbox_without_coordinate_system(session_factory
                 char_start=0,
                 char_end=5,
                 bbox=[0.1, 0.2, 0.3, 0.4],
-                text_sha256=_sha256(),
+                text_sha256=sha256_hex(),
             )
         )
         with pytest.raises(sa.exc.IntegrityError):

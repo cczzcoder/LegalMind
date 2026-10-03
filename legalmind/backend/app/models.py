@@ -482,3 +482,127 @@ class Job(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+PARSE_QUALITY_STATUSES = ("pending", "ok", "needs_review", "rejected")
+
+
+class ParseRevision(Base):
+    """解析版本（设计 5.1、7）。不可变：重新解析生成新版本，不覆盖旧版本。"""
+
+    __tablename__ = "parse_revisions"
+    __table_args__ = (
+        # 同一原件 + 同一解析配置只允许一个解析版本；解析器版本变化时新建行
+        UniqueConstraint(
+            "artifact_id",
+            "parser",
+            "parser_version",
+            "config_version",
+            name="uq_parse_revision_config",
+        ),
+        CheckConstraint(
+            _in("quality_status", PARSE_QUALITY_STATUSES),
+            name="ck_parse_revision_quality_status",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        primary_key=True,
+        default=uuid4,
+    )
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    artifact_id: Mapped[UUID] = mapped_column(
+        ForeignKey("source_artifacts.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    parser: Mapped[str] = mapped_column(String(100))
+    parser_version: Mapped[str] = mapped_column(String(50))
+    # 解析处理配置版本，与 documents/service.PARSE_CONFIG_VERSION 对应
+    config_version: Mapped[str] = mapped_column(String(50))
+    # 规范化文本的 SHA-256；char_start/char_end 相对该文本
+    text_sha256: Mapped[str] = mapped_column(String(64))
+    quality_status: Mapped[str] = mapped_column(String(20), default="pending")
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+
+class Chunk(Base):
+    """解析文本分块（设计 5.1）。"""
+
+    __tablename__ = "chunks"
+    __table_args__ = (
+        UniqueConstraint("parse_revision_id", "ordinal", name="uq_chunk_ordinal"),
+        CheckConstraint("ordinal >= 0", name="ck_chunk_ordinal_nonnegative"),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        primary_key=True,
+        default=uuid4,
+    )
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    parse_revision_id: Mapped[UUID] = mapped_column(
+        ForeignKey("parse_revisions.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    ordinal: Mapped[int] = mapped_column(Integer)
+    # 结构范围（章/节/条路径）；法律结构映射待法律版本切片定型
+    structure_path: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    text: Mapped[str] = mapped_column(Text)
+    text_sha256: Mapped[str] = mapped_column(String(64))
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+
+class ChunkSpan(Base):
+    """分块在原件中的定位（设计 6）。跨页分块对应多个 span。
+
+    设计 6 的定位 JSON 是序列化形态；此处做规范化，artifact_id / artifact_sha256 /
+    parse_revision_id 沿 chunk -> parse_revision 推导，不重复存储。
+    """
+
+    __tablename__ = "chunk_spans"
+    __table_args__ = (
+        UniqueConstraint("chunk_id", "ordinal", name="uq_chunk_span_ordinal"),
+        CheckConstraint("ordinal >= 0", name="ck_chunk_span_ordinal_nonnegative"),
+        CheckConstraint("char_start >= 0", name="ck_chunk_span_char_start_nonnegative"),
+        CheckConstraint("char_end > char_start", name="ck_chunk_span_char_range"),
+        # 坐标系与 bbox 必须同时有或同时无
+        CheckConstraint(
+            "(coordinate_system IS NULL) = (bbox IS NULL)",
+            name="ck_chunk_span_bbox_pair",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        primary_key=True,
+        default=uuid4,
+    )
+    chunk_id: Mapped[UUID] = mapped_column(
+        ForeignKey("chunks.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    ordinal: Mapped[int] = mapped_column(Integer)
+    # 原件零基页序号；无页概念的格式（如 HTML）为空
+    page_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 印刷页码独立保存，不与文件页序号混用
+    printed_page_label: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    block_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # 相对解析版本规范化文本的 Unicode 码点偏移
+    char_start: Mapped[int] = mapped_column(Integer)
+    char_end: Mapped[int] = mapped_column(Integer)
+    coordinate_system: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    bbox: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    text_sha256: Mapped[str] = mapped_column(String(64))

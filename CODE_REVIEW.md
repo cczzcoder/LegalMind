@@ -143,12 +143,13 @@ npm run format:check         # prettier
 npm run build                # 内含 tsc --noEmit
 ```
 
+以上门禁由 `.github/workflows/ci.yml` 在 push 与 PR 上自动执行；后端额外跑 `alembic check`，检测模型与迁移的漂移。
+
 ### 4.2 待引入（本规范生效后建议补齐，需一次决策）
 
 | 项 | 作用 | 说明 |
 | --- | --- | --- |
 | pre-commit | 提交前自动跑 lint/format | 开发机钩子，防止脏代码进 PR |
-| CI（GitHub Actions） | 每个 PR 自动跑 lint + 测试 | 仓库当前**无 CI**，是最大缺口 |
 | 依赖锁定 | 生成锁文件、固定镜像摘要 | README 已列为待办 |
 
 > 上述引入前需确认：CI 运行环境、是否允许联网拉依赖、是否需要镜像加速。**未确认前不擅自添加。**
@@ -230,7 +231,7 @@ npm run build                # 内含 tsc --noEmit
 | 后端 lint | `ruff check` + `ruff format --check` 通过 | 无 CI 自动执行（仅本地） |
 | 后端测试 | 110 项通过（含集成、权限矩阵） | 无覆盖率要求 |
 | 前端 | `tsc --noEmit` + build + `eslint` + `prettier --check` | 无前端测试 |
-| CI | **无** | 最大缺口 |
+| CI | GitHub Actions：后端 lint/迁移漂移/测试 + 前端 lint/构建 | 未接覆盖率与安全扫描 |
 | 提交钩子 | **无** | 无 pre-commit |
 | PR 模板 | **无**（本规范新增） | — |
 | 依赖锁定 | 未锁定（README 已注明） | 待补锁文件与镜像摘要 |

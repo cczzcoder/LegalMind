@@ -54,11 +54,11 @@
 
 | 项 | 作用 | 备注 |
 | --- | --- | --- |
-| CI（GitHub Actions） | 每个 PR 自动跑 lint + 测试 | 仓库当前**无 CI**，是最大缺口 |
+| CI（GitHub Actions） | 每个 PR 自动跑 lint + 测试 | **已引入**（`.github/workflows/ci.yml`，push/PR 触发；后端另跑 `alembic check`） |
 | pre-commit | 提交前自动 lint / format | 依赖 n2 先定格式基线 |
 | 依赖锁定 | 生成锁文件、固定镜像摘要 | README 已列为待办 |
 
-引入前需确认：CI 运行环境、是否允许联网拉依赖、是否需要镜像加速。
+CI 运行环境：已按 GitHub 托管 runner + 默认 PyPI/npm 源配置；若改用国内自建 runner，按 `ci.yml` 顶部注释改镜像。其余两项引入前仍需确认。
 
 ---
 
@@ -69,6 +69,6 @@
 | 一、随手可修 | 0 | 已全部修复（89a82df），原 7 项约 20 行 |
 | 二、需一次决策 | 1 | n1、n2、m2、n3 已完成；余类型生成（m7） |
 | 三、P5 功能补齐 | 2 | M3 改动面最大，需与 P5 一起设计 |
-| 四、基础设施 | 3 | 需一次决策后实施 |
+| 四、基础设施 | 2 | CI 已引入；余 pre-commit、依赖锁定 |
 
 **已关闭（不在本清单）**：B1、M1、M2、M4、M5、M6、合规缺口 —— 见 `CODE_REVIEW_BASELINE.md`。

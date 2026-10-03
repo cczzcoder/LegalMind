@@ -25,6 +25,8 @@ Lint 与格式化使用 ruff（配置见 `backend/pyproject.toml`）：`ruff che
 
 前端 lint 与格式化使用 eslint + prettier（配置见 `frontend/eslint.config.js`、`frontend/.prettierrc.json`）：`npm run lint`、`npm run format`；提交前保证 `npm run format:check` 通过。
 
+CI 见 `.github/workflows/ci.yml`：push 与 PR 自动跑后端 lint / 迁移漂移检查 / 测试，以及前端 lint / 构建。
+
 ### 本机开发（数据库在 Docker，API 在本机）
 
 统一使用虚拟环境里的 Python（3.12）：`legalmind/backend/.venv/Scripts/python.exe`。不要用 `py -3.12`，它在本机因中文用户名路径无法启动。

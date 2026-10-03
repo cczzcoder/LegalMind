@@ -13,6 +13,7 @@ from app.core.database import get_session
 from app.core.security import Principal, get_principal
 from app.main import app
 from app.models import AuditEvent, OutboxEvent, WikiPage, WikiRevision
+from app.modules.authorization import grants
 from app.modules.wiki import service
 from app.modules.wiki.schemas import CreatePage, CreateRevision
 
@@ -90,7 +91,7 @@ async def test_outbox_failure_rolls_back_page_and_audit(session_factory, monkeyp
         # event_type 超过 VARCHAR(100)，在数据库层写入失败
         return OutboxEvent(**{**kwargs, "event_type": "x" * 101})
 
-    monkeypatch.setattr(service, "OutboxEvent", broken_outbox_event)
+    monkeypatch.setattr(grants, "OutboxEvent", broken_outbox_event)
 
     async with session_factory() as session:
         with pytest.raises(DBAPIError):

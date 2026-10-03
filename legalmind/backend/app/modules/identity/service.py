@@ -11,6 +11,8 @@ from app.core.security import (
     Principal,
     hash_password,
     hash_token,
+    is_mfa_pending,
+    mfa_status,
     new_token,
     utcnow,
     verify_password,
@@ -28,6 +30,7 @@ class NewSession:
     token: str
     csrf_token: str
     user: UserOut
+    mfa_status: str
 
 
 def audit(
@@ -60,6 +63,7 @@ async def user_out(session: AsyncSession, user: User) -> UserOut:
         username=user.username,
         is_active=user.is_active,
         roles=list(roles),
+        mfa_enabled=user.mfa_enabled_at is not None,
     )
 
 
@@ -114,17 +118,18 @@ async def login(
         else:
             token, csrf_token = new_token(), new_token()
             now = utcnow()
-            session.add(
-                AuthSession(
-                    user_id=user.id,
-                    token_hash=hash_token(token),
-                    csrf_token=csrf_token,
-                    last_seen_at=now,
-                    expires_at=now + SESSION_MAX_AGE,
-                )
+            auth_session = AuthSession(
+                user_id=user.id,
+                token_hash=hash_token(token),
+                csrf_token=csrf_token,
+                last_seen_at=now,
+                expires_at=now + SESSION_MAX_AGE,
             )
+            session.add(auth_session)
             audit(session, user.organization_id, user.id, "auth.login.succeeded", user.id)
-            result = NewSession(token, csrf_token, await user_out(session, user))
+            out = await user_out(session, user)
+            pending = is_mfa_pending(user, frozenset(out.roles), auth_session)
+            result = NewSession(token, csrf_token, out, mfa_status(user, pending))
 
     # 失败记录已提交后再返回统一错误
     if result is None:

@@ -3,9 +3,13 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
+from app.core.config import get_settings
 from app.core.database import engine
+from app.modules.documents.router import router as documents_router
 from app.modules.identity.router import router as identity_router
+from app.modules.sources.router import router as sources_router
 from app.modules.wiki.router import router as wiki_router
 
 
@@ -22,8 +26,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# 只信任 TRUSTED_PROXIES 中的代理传来的 X-Forwarded-For；为空时始终使用直连地址。
+# uvicorn 自带的代理头处理默认信任 127.0.0.1，启动时须加 --no-proxy-headers，由这里统一控制。
+app.add_middleware(
+    ProxyHeadersMiddleware,
+    trusted_hosts=get_settings().trusted_proxy_list,
+)
+
 app.include_router(identity_router, prefix="/api/v1")
 app.include_router(wiki_router, prefix="/api/v1")
+app.include_router(sources_router, prefix="/api/v1")
+app.include_router(documents_router, prefix="/api/v1")
 
 
 @app.get("/health/live", tags=["health"])

@@ -4,6 +4,10 @@ x-backend-environment: &backend-environment
   APP_ENV: ${APP_ENV:-development}
   DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
   SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+  MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:-}
+  TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+  STORAGE_ROOT: /data/artifacts
+  MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-52428800}
 
 services:
   postgres:
@@ -37,6 +41,9 @@ services:
     build:
       context: ./backend
     environment: *backend-environment
+    # 原始文件与数据库一样需要持久化和备份；不挂到任何静态目录
+    volumes:
+      - artifacts_data:/data/artifacts
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
@@ -65,3 +72,4 @@ services:
 
 volumes:
   postgres_data:
+  artifacts_data:

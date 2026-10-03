@@ -3,16 +3,21 @@ import {
   Alert,
   Button,
   Card,
+  Checkbox,
   Input,
   List,
   Space,
+  Tag,
   Typography,
 } from "antd";
+
+type AccessScope = "organization" | "restricted";
 
 type Page = {
   id: string;
   title: string;
   head_revision: number;
+  access_scope: AccessScope;
   created_at: string;
 };
 
@@ -31,6 +36,13 @@ type CurrentUser = {
   username: string;
   roles: string[];
   csrf_token: string;
+  // ok：可使用业务接口；enroll：需先绑定 TOTP；verify：需输入验证码
+  mfa_status: "ok" | "enroll" | "verify";
+};
+
+type Enrollment = {
+  secret: string;
+  otpauth_uri: string;
 };
 
 export default function App() {
@@ -43,6 +55,11 @@ export default function App() {
   const [revisions, setRevisions] = useState<Revision[]>([]);
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
+  const [restricted, setRestricted] = useState(false);
+  const [mfaCode, setMfaCode] = useState("");
+  const [enrollment, setEnrollment] = useState<Enrollment | null>(null);
+  // 恢复码只在绑定成功时显示一次，不持久化
+  const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
@@ -98,6 +115,10 @@ export default function App() {
     setRevisions([]);
     setTitle("");
     setBody("");
+    setRestricted(false);
+    setMfaCode("");
+    setEnrollment(null);
+    setRecoveryCodes([]);
   }
 
   // 刷新页面后用已有会话恢复登录状态；未登录时静默忽略 401
@@ -129,7 +150,33 @@ export default function App() {
     }
   }
 
-  const canWrite = Boolean(
+  async function startEnrollment() {
+    setEnrollment(await api<Enrollment>("/auth/mfa/enroll", { method: "POST" }));
+  }
+
+  async function confirmEnrollment() {
+    const result = await api<{ recovery_codes: string[] }>("/auth/mfa/confirm", {
+      method: "POST",
+      body: JSON.stringify({ code: mfaCode }),
+    });
+    setMfaCode("");
+    setEnrollment(null);
+    setRecoveryCodes(result.recovery_codes);
+    setUser((previous) => previous && { ...previous, mfa_status: "ok" });
+  }
+
+  async function verifyMfa() {
+    await api<void>("/auth/mfa/verify", {
+      method: "POST",
+      body: JSON.stringify({ code: mfaCode }),
+    });
+    setMfaCode("");
+    setUser((previous) => previous && { ...previous, mfa_status: "ok" });
+  }
+
+  const mfaReady = user?.mfa_status === "ok";
+
+  const canWrite = mfaReady && Boolean(
     user?.roles.some((role) => ["editor", "knowledge_admin"].includes(role)),
   );
 
@@ -177,6 +224,7 @@ export default function App() {
     setRevisions([]);
     setTitle("");
     setBody("");
+    setRestricted(false);
     setError("");
     setNotice("");
   }
@@ -201,15 +249,17 @@ export default function App() {
       setRevisions((previous) => [revision, ...previous]);
       setNotice(`已保存为修订 ${revision.number}。`);
     } else {
+      const access_scope: AccessScope = restricted ? "restricted" : "organization";
       const revision = await api<Revision>("/wiki/pages", {
         method: "POST",
-        body: JSON.stringify({ title, body }),
+        body: JSON.stringify({ title, body, access_scope }),
       });
 
       setSelected({
         id: revision.page_id,
         title,
         head_revision: revision.number,
+        access_scope,
         created_at: revision.created_at,
       });
       setRevisions([revision]);
@@ -231,7 +281,7 @@ export default function App() {
         showIcon
         message="仅供本地开发"
         description={
-          "当前只有登录、角色权限和 Wiki 草稿与修订能力。未实现管理员 MFA、页面级授权、审核发布、法律检索或 AI 问答。"
+          "当前有登录、管理员 TOTP 第二因素、角色权限、受限页面和 Wiki 草稿与修订能力。页面授权名单通过 API 管理，界面尚未提供；未实现审核发布、法律检索或 AI 问答。"
         }
       />
 
@@ -242,7 +292,7 @@ export default function App() {
               {user.username}（{user.roles.join("、")}）
             </Typography.Text>
             <Button
-              disabled={busy}
+              disabled={busy || !mfaReady}
               onClick={() => void execute(loadPages)}
             >
               加载页面
@@ -251,13 +301,99 @@ export default function App() {
               退出登录
             </Button>
           </Space>
-          {!canWrite && (
+          {mfaReady && !canWrite && (
             <Typography.Paragraph type="secondary">
-              当前角色只有阅读权限，不能保存修订。
+              当前角色没有写入权限，不能保存修订。
             </Typography.Paragraph>
           )}
         </Card>
-      ) : (
+      ) : null}
+
+      {user && !mfaReady && (
+        <Card
+          title={user.mfa_status === "enroll" ? "绑定第二因素" : "第二因素验证"}
+          className="section"
+        >
+          {user.mfa_status === "enroll" && !enrollment && (
+            <Space direction="vertical">
+              <Typography.Paragraph>
+                管理员账号须绑定 TOTP 认证器（如 Microsoft Authenticator、Google
+                Authenticator）后才能使用业务功能。
+              </Typography.Paragraph>
+              <Button
+                type="primary"
+                loading={busy}
+                onClick={() => void execute(startEnrollment)}
+              >
+                开始绑定
+              </Button>
+            </Space>
+          )}
+          {(user.mfa_status === "verify" || enrollment) && (
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                void execute(enrollment ? confirmEnrollment : verifyMfa);
+              }}
+            >
+              <Space direction="vertical" style={{ width: "100%" }}>
+                {enrollment && (
+                  <>
+                    <Typography.Paragraph>
+                      在认证器中手动添加以下密钥，或复制链接导入，然后输入显示的 6 位验证码。
+                    </Typography.Paragraph>
+                    <Typography.Text code copyable>
+                      {enrollment.secret}
+                    </Typography.Text>
+                    <Typography.Text type="secondary" copyable={{ text: enrollment.otpauth_uri }}>
+                      复制 otpauth 链接
+                    </Typography.Text>
+                  </>
+                )}
+                {!enrollment && (
+                  <Typography.Paragraph>
+                    输入认证器中的 6 位验证码；丢失认证器时可输入一个恢复码。
+                  </Typography.Paragraph>
+                )}
+                <Space wrap>
+                  <Input
+                    aria-label="验证码"
+                    autoComplete="one-time-code"
+                    placeholder={enrollment ? "6 位验证码" : "验证码或恢复码"}
+                    value={mfaCode}
+                    disabled={busy}
+                    maxLength={20}
+                    onChange={(event) => setMfaCode(event.target.value.trim())}
+                    style={{ width: 200 }}
+                  />
+                  <Button
+                    type="primary"
+                    htmlType="submit"
+                    loading={busy}
+                    disabled={mfaCode.length < 6}
+                  >
+                    {enrollment ? "确认绑定" : "验证"}
+                  </Button>
+                </Space>
+              </Space>
+            </form>
+          )}
+        </Card>
+      )}
+
+      {recoveryCodes.length > 0 && (
+        <Alert
+          className="section"
+          type="info"
+          showIcon
+          closable
+          onClose={() => setRecoveryCodes([])}
+          message="恢复码只显示这一次，请离线妥善保存。每个恢复码只能使用一次。"
+          description={<pre className="revision-body">{recoveryCodes.join("\n")}</pre>}
+        />
+      )}
+
+      {!user && (
         <Card title="登录" className="section">
           <form
             onSubmit={(event) => {
@@ -340,6 +476,7 @@ export default function App() {
                 >
                   {page.title}
                 </Button>
+                {page.access_scope === "restricted" && <Tag>受限</Tag>}
               </List.Item>
             )}
           />
@@ -370,6 +507,22 @@ export default function App() {
               maxLength={200000}
               showCount
             />
+
+            {selected ? (
+              selected.access_scope === "restricted" && (
+                <Typography.Text type="secondary">
+                  受限页面：仅获授权的用户可见。
+                </Typography.Text>
+              )
+            ) : (
+              <Checkbox
+                checked={restricted}
+                disabled={busy}
+                onChange={(event) => setRestricted(event.target.checked)}
+              >
+                受限页面（仅自己和获授权的用户可见）
+              </Checkbox>
+            )}
 
             <Button
               type="primary"

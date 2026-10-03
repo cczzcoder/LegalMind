@@ -36,13 +36,14 @@ set -a && . ../.env && set +a
 export DATABASE_URL="postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}"
 .venv/Scripts/python.exe -m alembic upgrade head
 .venv/Scripts/python.exe -m app.cli create-user --org 示例机构 --username admin --role system_admin   # 首次；密码交互输入
+.venv/Scripts/python.exe -m app.cli reset-mfa --username admin   # 管理员丢失认证器和恢复码时
 .venv/Scripts/python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 .venv/Scripts/python.exe -m pytest
 ```
 
-系统不开放注册，用户只能由 CLI 或管理员通过 `/api/v1/users` 创建。
+系统不开放注册，用户只能由 CLI 或管理员通过 `/api/v1/users` 创建。system_admin、knowledge_admin 登录后须先完成 TOTP（需在 `.env` 设置 `MFA_ENCRYPTION_KEY`）。
 
-集成测试（`tests/test_wiki_integration.py`）连接独立的 `legalmind_test` 库，未设置 `TEST_DATABASE_URL` 时自动跳过。测试库首次需手动创建，测试会自动迁移：
+集成测试（`tests/test_*_integration.py`、`tests/test_permission_matrix.py`）连接独立的 `legalmind_test` 库，未设置 `TEST_DATABASE_URL` 时自动跳过。测试库首次需手动创建，测试会自动迁移：
 
 ```bash
 docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "CREATE DATABASE legalmind_test"   # 在 legalmind/ 下执行，仅首次

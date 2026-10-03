@@ -1,12 +1,17 @@
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+AccessScope = Literal["organization", "restricted"]
 
 
 class CreatePage(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     body: str = Field(min_length=1, max_length=200_000)
+    # restricted：只有被授权的用户可访问，创建者自动获得授权
+    access_scope: AccessScope = "organization"
 
     @field_validator("title", "body")
     @classmethod
@@ -34,6 +39,19 @@ class PageOut(BaseModel):
     id: UUID
     title: str
     head_revision: int
+    access_scope: AccessScope
+    created_at: datetime
+
+
+class SetAccessScope(BaseModel):
+    access_scope: AccessScope
+
+
+class GrantOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    user_id: UUID
+    granted_by: UUID
     created_at: datetime
 
 

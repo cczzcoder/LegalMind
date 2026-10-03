@@ -1,84 +1,17 @@
 """认证与授权集成测试（FR-10、设计 11.1/11.2）：需要 TEST_DATABASE_URL。"""
 
-import random
 from datetime import timedelta
 from uuid import uuid4
 
-import httpx
 import pytest
 from sqlalchemy import select, update
 
-from app.core.database import get_session
 from app.core.security import CSRF_HEADER, SESSION_COOKIE, hash_token
-from app.main import app
-from app.models import AuditEvent, AuthSession, Organization, User
+from app.models import AuditEvent, AuthSession, User
 from app.modules.identity import service
-from app.modules.identity.schemas import CreateUser
+from tests.helpers import PASSWORD, create_page, login
 
 pytestmark = pytest.mark.anyio
-
-PASSWORD = "correct horse battery"
-
-
-@pytest.fixture
-def make_client(session_factory):
-    async def override_session():
-        async with session_factory() as session:
-            yield session
-
-    app.dependency_overrides[get_session] = override_session
-
-    def make() -> httpx.AsyncClient:
-        # 每个客户端使用随机来源 IP，避免按 IP 的失败计数在测试间累积
-        ip = f"10.{random.randint(0, 255)}.{random.randint(0, 255)}.{random.randint(1, 254)}"
-        return httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app, client=(ip, 12345)),
-            base_url="http://test",
-        )
-
-    yield make
-    app.dependency_overrides.clear()
-
-
-@pytest.fixture
-def make_user(session_factory):
-    async def make(*roles: str, organization_id=None):
-        async with session_factory() as session:
-            if organization_id is None:
-                async with session.begin():
-                    organization = Organization(name=f"org-{uuid4()}")
-                    session.add(organization)
-                organization_id = organization.id
-
-            return await service.create_user(
-                session,
-                organization_id,
-                None,
-                CreateUser(
-                    username=f"u-{uuid4().hex[:12]}",
-                    password=PASSWORD,
-                    roles=list(roles),
-                ),
-            )
-
-    return make
-
-
-async def login(client: httpx.AsyncClient, username: str, password: str = PASSWORD):
-    response = await client.post(
-        "/api/v1/auth/login",
-        json={"username": username, "password": password},
-    )
-    if response.status_code == 200:
-        client.headers[CSRF_HEADER] = response.json()["csrf_token"]
-    return response
-
-
-async def create_page(client: httpx.AsyncClient):
-    return await client.post(
-        "/api/v1/wiki/pages",
-        json={"title": "测试页面", "body": "正文"},
-    )
 
 
 async def test_login_sets_hardened_cookie_and_me_works(make_client, make_user):

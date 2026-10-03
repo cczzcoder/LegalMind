@@ -1,3 +1,4 @@
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
@@ -38,7 +39,24 @@ class UserOut(BaseModel):
     username: str
     is_active: bool
     roles: list[str]
+    mfa_enabled: bool
 
 
 class CurrentUser(UserOut):
     csrf_token: str
+    # ok：可使用业务接口；enroll：需先绑定 TOTP；verify：需输入验证码
+    mfa_status: Literal["ok", "enroll", "verify"]
+
+
+class MfaCode(BaseModel):
+    # TOTP 为 6 位数字；恢复码形如 xxxxx-xxxxx
+    code: str = Field(min_length=6, max_length=20)
+
+
+class MfaEnrollment(BaseModel):
+    secret: str
+    otpauth_uri: str
+
+
+class RecoveryCodes(BaseModel):
+    recovery_codes: list[str]

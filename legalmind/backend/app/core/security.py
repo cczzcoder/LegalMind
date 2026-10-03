@@ -19,6 +19,8 @@ CSRF_HEADER = "X-CSRF-Token"
 SESSION_IDLE_TIMEOUT = timedelta(minutes=30)
 SESSION_MAX_AGE = timedelta(hours=12)
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+# 这些角色必须绑定并通过 TOTP 才能使用业务接口（FR-10“管理员强认证”）
+MFA_REQUIRED_ROLES = frozenset({"system_admin", "knowledge_admin"})
 
 password_hasher = PasswordHasher()  # Argon2id，使用库的推荐参数
 # 用户名不存在时也做一次校验，避免通过响应时间判断账号是否存在
@@ -31,6 +33,19 @@ class Principal:
     user_id: UUID
     roles: frozenset[str]
     session_id: UUID | None = None
+    # 已通过密码验证、但还需绑定或验证第二因素
+    mfa_pending: bool = False
+
+
+def is_mfa_pending(user: User, roles: frozenset[str], auth_session: AuthSession) -> bool:
+    required = user.mfa_enabled_at is not None or bool(roles & MFA_REQUIRED_ROLES)
+    return required and auth_session.mfa_verified_at is None
+
+
+def mfa_status(user: User, pending: bool) -> str:
+    if not pending:
+        return "ok"
+    return "verify" if user.mfa_enabled_at is not None else "enroll"
 
 
 def hash_password(password: str) -> str:
@@ -57,10 +72,16 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-async def get_principal(
+def client_ip(request: Request) -> str:
+    # 可信反向代理的 X-Forwarded-For 已由 ProxyHeadersMiddleware 解析（见 main.py）
+    return request.client.host if request.client else "unknown"
+
+
+async def get_session_principal(
     request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Principal:
+    """已登录即可，允许第二因素未完成；只用于 MFA、退出和当前用户接口。"""
     token = request.cookies.get(SESSION_COOKIE)
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
@@ -96,14 +117,24 @@ async def get_principal(
             raise HTTPException(status_code=403, detail="CSRF token missing or invalid")
 
         # 每次请求重新读取角色，权限变更立即生效
-        roles = await session.scalars(
-            select(UserRole.role).where(UserRole.user_id == user.id)
+        roles = frozenset(
+            await session.scalars(select(UserRole.role).where(UserRole.user_id == user.id))
         )
         auth_session.last_seen_at = now
 
         return Principal(
             organization_id=user.organization_id,
             user_id=user.id,
-            roles=frozenset(roles),
+            roles=roles,
             session_id=auth_session.id,
+            mfa_pending=is_mfa_pending(user, roles, auth_session),
         )
+
+
+async def get_principal(
+    principal: Annotated[Principal, Depends(get_session_principal)],
+) -> Principal:
+    """业务接口使用：要求第二因素已完成（需要时）。"""
+    if principal.mfa_pending:
+        raise HTTPException(status_code=403, detail="MFA required")
+    return principal

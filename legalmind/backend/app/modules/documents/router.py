@@ -17,6 +17,7 @@ from app.modules.authorization.service import (
     DOCUMENT_GRANT,
     DOCUMENT_READ,
     DOCUMENT_WRITE,
+    SOURCE_MANAGE,
     AuthorizationService,
     require_permission,
 )
@@ -28,6 +29,7 @@ from app.modules.documents.schemas import (
     JobOut,
     Sensitivity,
     SetAccessScope,
+    SetDocumentSource,
 )
 from app.modules.wiki.schemas import GrantOut
 
@@ -39,6 +41,8 @@ ReaderDep = Annotated[Principal, Depends(require_permission(DOCUMENT_READ))]
 DownloaderDep = Annotated[Principal, Depends(require_permission(DOCUMENT_DOWNLOAD))]
 WriterDep = Annotated[Principal, Depends(require_permission(DOCUMENT_WRITE))]
 GrantorDep = Annotated[Principal, Depends(require_permission(DOCUMENT_GRANT))]
+# 更正来源归属属于「来源管理」（需求第 3 节：知识管理员管理来源），不是普通文档编辑
+SourceManagerDep = Annotated[Principal, Depends(require_permission(SOURCE_MANAGE))]
 
 
 async def read_body(request: Request) -> bytes:
@@ -141,6 +145,17 @@ async def set_access_scope(
     principal: GrantorDep,
 ):
     return await service.set_access_scope(session, principal, document_id, data.access_scope)
+
+
+@router.put("/documents/{document_id}/source", response_model=DocumentOut)
+async def set_source(
+    document_id: UUID,
+    data: SetDocumentSource,
+    session: SessionDep,
+    principal: SourceManagerDep,
+):
+    """更正原件来源归属；目标来源须已登记授权说明（设计 §20.3），变更写审计。"""
+    return await service.set_source(session, principal, document_id, data.source_id)
 
 
 @router.get("/documents/{document_id}/grants", response_model=list[GrantOut])

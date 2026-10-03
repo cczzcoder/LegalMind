@@ -204,7 +204,9 @@ async def test_restricted_document_hidden_until_granted(make_client, make_user, 
         await login(admin_client, admin.username)
 
         async def reader_sees() -> tuple[int, int, int, bool]:
-            listed = await reader_client.get("/api/v1/documents")
+            # 按本用例的来源过滤：/documents 默认 limit=50 且按随机 UUID 排序，测试库累积后
+            # 不过滤就可能取不到本用例的原件（公共数据全库共享，列表会越来越长）
+            listed = await reader_client.get("/api/v1/documents", params={"source_id": source_id})
             return (
                 (await reader_client.get(f"/api/v1/documents/{document_id}")).status_code,
                 (await reader_client.get(f"/api/v1/documents/{document_id}/content")).status_code,
@@ -335,6 +337,72 @@ async def test_source_validation_and_duplicates(make_client, make_user):
     assert no_license.status_code == bad_url.status_code == naive_time.status_code == 422
 
 
+async def test_update_source_records_changes_with_audit(make_client, make_user, session_factory):
+    """更正来源登记信息（FR-01、设计 §20.3）：写审计含前后值，授权说明不可清空。"""
+    admin = await make_user("knowledge_admin")
+    async with make_client() as client:
+        await login(client, admin.username)
+        created = await create_source(client, name=f"待更正来源-{uuid4().hex[:8]}")
+        assert created.status_code == 201
+        source_id = created.json()["id"]
+        other = await create_source(client, name=f"另一个来源-{uuid4().hex[:8]}")
+        other_name = other.json()["name"]
+
+        updated = await client.put(
+            f"/api/v1/sources/{source_id}",
+            json={
+                "url": "https://flk.npc.gov.cn/index",
+                "publisher": "全国人大常委会办公厅",
+                "license_note": "官方渠道公开发布；电子文本与标准文本不一致时以标准文本为准。",
+            },
+        )
+        cleared = await client.put(f"/api/v1/sources/{source_id}", json={"license_note": None})
+        renamed = await client.put(f"/api/v1/sources/{source_id}", json={"name": other_name})
+        empty = await client.put(f"/api/v1/sources/{source_id}", json={})
+
+    assert updated.status_code == 200
+    body = updated.json()
+    assert body["url"] == "https://flk.npc.gov.cn/index"
+    assert body["publisher"] == "全国人大常委会办公厅"
+    # 未提交的字段保持不变
+    assert body["source_type"] == "official"
+    assert body["name"] == created.json()["name"]
+    # 授权说明是「未登记授权说明的来源不得入库」的判据，不能清空
+    assert cleared.status_code == 422
+    assert renamed.status_code == 409
+    assert empty.status_code == 422
+
+    async with session_factory() as session:
+        event = await session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.action == "source.updated",
+                AuditEvent.resource_id == UUID(source_id),
+            )
+        )
+        assert event.payload["changed_fields"] == ["license_note", "publisher", "url"]
+        # 留痕要能看出原来写的是什么，而不只是改了哪些字段
+        assert event.payload["before"]["url"] == "https://flk.npc.gov.cn"
+        assert event.payload["after"]["url"] == "https://flk.npc.gov.cn/index"
+        assert event.payload["before"]["publisher"] is None
+        assert event.payload["after"]["publisher"] == "全国人大常委会办公厅"
+
+
+async def test_update_source_requires_source_manage(make_client, make_user):
+    admin = await make_user("knowledge_admin")
+    editor = await make_user("editor", organization_id=admin.organization_id)
+    async with make_client() as client:
+        await login(client, admin.username)
+        source_id = (await create_source(client)).json()["id"]
+
+    async with make_client() as client:
+        await login(client, editor.username)
+        denied = await client.put(
+            f"/api/v1/sources/{source_id}", json={"publisher": "全国人大常委会办公厅"}
+        )
+
+    assert denied.status_code == 403
+
+
 async def test_job_lookup_limited_to_parse_jobs(make_client, make_user, session_factory):
     editor = await make_user("editor")
     async with session_factory() as session, session.begin():
@@ -353,3 +421,80 @@ async def test_job_lookup_limited_to_parse_jobs(make_client, make_user, session_
         response = await client.get(f"/api/v1/jobs/{job.id}")
 
     assert response.status_code == 404
+
+
+async def test_set_source_moves_document_and_audits(
+    make_client, make_user, storage, session_factory
+):
+    """更正原件来源归属（FR-01、设计 §20.3）：改归属、写审计、重复设置是空操作。
+
+    必须请求 ``storage`` fixture：否则上传走真实的 ``get_storage()``，把原件写进仓库的
+    ``data/artifacts/``（污染开发环境）。
+    """
+    admin, _, source_a = await setup_org(make_client, make_user)
+    async with make_client() as client:
+        await login(client, admin.username)
+        created = await create_source(client, name=f"中国法律资源库-{uuid4().hex[:8]}")
+        assert created.status_code == 201
+        source_b = created.json()["id"]
+        imported = await import_file(client, source_a)
+        assert imported.status_code == 202
+        document_id = imported.json()["document"]["id"]
+
+        moved = await client.put(
+            f"/api/v1/documents/{document_id}/source", json={"source_id": source_b}
+        )
+        # 目标来源不存在时 404
+        unknown = await client.put(
+            f"/api/v1/documents/{document_id}/source", json={"source_id": str(uuid4())}
+        )
+        # 已是该来源：空操作，不重复写审计
+        again = await client.put(
+            f"/api/v1/documents/{document_id}/source", json={"source_id": source_b}
+        )
+
+    assert moved.status_code == 200
+    assert moved.json()["source_id"] == source_b
+    assert unknown.status_code == 404
+    assert again.status_code == 200
+
+    async with session_factory() as session:
+        changes = (
+            await session.scalars(
+                select(AuditEvent).where(
+                    AuditEvent.action == "document.source_changed",
+                    AuditEvent.resource_id == UUID(document_id),
+                )
+            )
+        ).all()
+        assert len(changes) == 1
+        assert changes[0].payload["before_source_id"] == source_a
+        assert changes[0].payload["after_source_id"] == source_b
+        # 留痕要能看出改成了哪个来源，而不只是 id
+        assert changes[0].payload["after_source_name"].startswith("中国法律资源库")
+
+
+async def test_set_source_requires_source_manage(make_client, make_user, storage, session_factory):
+    """编辑有 document.write 但没有 source.manage（需求第 3 节），不得改来源归属。
+
+    必须请求 ``storage`` fixture：否则上传走真实的 ``get_storage()``，把原件写进仓库的
+    ``data/artifacts/``（污染开发环境）。
+    """
+    admin, editor, source_a = await setup_org(make_client, make_user)
+    async with make_client() as client:
+        await login(client, admin.username)
+        source_b = (await create_source(client, name=f"另一来源-{uuid4().hex[:8]}")).json()["id"]
+        imported = await import_file(client, source_a)
+        document_id = imported.json()["document"]["id"]
+
+    async with make_client() as client:
+        await login(client, editor.username)
+        denied = await client.put(
+            f"/api/v1/documents/{document_id}/source", json={"source_id": source_b}
+        )
+
+    assert denied.status_code == 403
+
+    async with session_factory() as session:
+        artifact = await session.get(SourceArtifact, UUID(document_id))
+        assert artifact.source_id == UUID(source_a)

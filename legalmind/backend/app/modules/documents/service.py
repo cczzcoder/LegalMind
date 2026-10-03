@@ -214,6 +214,55 @@ async def set_access_scope(
     return artifact
 
 
+async def set_source(
+    session: AsyncSession,
+    principal: Principal,
+    document_id: UUID,
+    source_id: UUID,
+) -> SourceArtifact:
+    """更正原件的来源归属（FR-01、设计 §20.3）。
+
+    来源决定可信等级与授权说明，更正归属属于「来源管理」而不是普通文档编辑，因此调用方须
+    持有 ``SOURCE_MANAGE``（需求第 3 节：知识管理员管理来源）。§20.3 要求「来源更新、撤回或
+    内容变化须留痕」，故变更写 ``document.source_changed`` 审计（含变更前后的来源 id 与名称）。
+
+    只改归属，不动原件、解析产物与法律版本——解析不依赖来源，可信等级由 ``sources`` 表在读取时体现。
+    """
+    async with session.begin():
+        artifact = await get_document_for_management(session, document_id)
+        target = await get_source(session, source_id)
+        if artifact.source_id == target.id:
+            return artifact
+        previous = await get_source(session, artifact.source_id)
+        artifact.source_id = target.id
+        record_event(
+            session,
+            principal,
+            artifact.id,
+            "document.source_changed",
+            {
+                "document_id": str(artifact.id),
+                "before_source_id": str(previous.id),
+                "after_source_id": str(target.id),
+                "before_source_name": previous.name,
+                "after_source_name": target.name,
+            },
+        )
+        await session.flush()
+        await session.refresh(artifact)
+    return artifact
+
+
+async def list_artifact_ids(session: AsyncSession, source_id: UUID) -> list[UUID]:
+    """某来源下的全部原件 ID（用于按来源整批撤下）。"""
+    async with session.begin():
+        return list(
+            await session.scalars(
+                select(SourceArtifact.id).where(SourceArtifact.source_id == source_id)
+            )
+        )
+
+
 async def list_grants(
     session: AsyncSession,
     principal: Principal,

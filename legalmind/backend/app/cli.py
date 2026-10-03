@@ -4,7 +4,12 @@
     python -m app.cli create-user --org 示例机构 --username admin --role system_admin
     python -m app.cli reset-mfa --username admin
     python -m app.cli create-source --as kadmin --name 来源 --type official --trust high --license-note 说明
+    python -m app.cli update-source --as kadmin --source <id> [--url ...] [--license-note ...]
     python -m app.cli import-documents --as editor1 --source <id> --dir 目录 --sensitivity public
+    python -m app.cli set-document-source --as kadmin --document <id> --source <id>   # 更正来源归属
+    python -m app.cli withdraw-document --as kadmin --document <id> [--document <id>...] --reason 原因 [--dry-run]
+    python -m app.cli withdraw-document --as kadmin --from-source <来源 id> --reason 原因 [--dry-run]
+    python -m app.cli run-worker [--once]        # 按需启动后台 worker（解析等）
 密码从终端交互输入，不经命令行参数传递，避免进入 shell 历史。
 """
 
@@ -13,6 +18,7 @@ import asyncio
 import getpass
 import hashlib
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -45,10 +51,12 @@ from app.modules.authorization.service import (
     AuthorizationService,
 )
 from app.modules.documents import service as documents_service
+from app.modules.documents import withdrawal as documents_withdrawal
 from app.modules.identity import mfa, service
 from app.modules.identity.schemas import CreateUser
 from app.modules.sources import service as sources_service
-from app.modules.sources.schemas import CreateSource
+from app.modules.sources.schemas import CreateSource, UpdateSource
+from app.workers import runner as worker_runner
 
 
 async def create_user(org_name: str, username: str, roles: list[str], password: str) -> None:
@@ -98,6 +106,64 @@ async def create_source(username: str, data: CreateSource) -> None:
         finally:
             await engine.dispose()
     print(f"Created source {source.name} ({source.id})")
+
+
+async def update_source(username: str, source_id: UUID, data: UpdateSource) -> None:
+    """更正来源登记信息；需 source.manage，变更写审计（设计 §20.3）。"""
+    async with SessionFactory() as session:
+        try:
+            async with session.begin():
+                principal = await cli_principal(session, username, SOURCE_MANAGE)
+            source = await sources_service.update_source(session, principal, source_id, data)
+        except HTTPException as error:
+            sys.exit(f"{error.status_code}: {error.detail}")
+        finally:
+            await engine.dispose()
+    print(f"Updated source {source.name} ({source.id})")
+
+
+async def withdraw_documents_command(
+    username: str,
+    document_ids: list[UUID],
+    source_id: UUID | None,
+    reason: str,
+    dry_run: bool,
+) -> None:
+    """整批撤下原件及其解析产物（设计 §15.3）；需 source.manage，操作写审计。"""
+    async with SessionFactory() as session:
+        try:
+            async with session.begin():
+                principal = await cli_principal(session, username, SOURCE_MANAGE)
+            if source_id is not None:
+                document_ids = await documents_service.list_artifact_ids(session, source_id)
+                if not document_ids:
+                    sys.exit(f"No documents under source {source_id}")
+            report = await documents_withdrawal.withdraw_documents(
+                session,
+                principal,
+                get_storage(),
+                document_ids,
+                reason=reason,
+                dry_run=dry_run,
+            )
+        except HTTPException as error:
+            sys.exit(f"{error.status_code}: {error.detail}")
+        finally:
+            await engine.dispose()
+
+    verb = "将撤下" if dry_run else "已撤下"
+    print(f"{verb} {len(report.documents)} 份原件：")
+    for plan in report.documents:
+        print(
+            f"  - {plan.filename}：解析版本 {plan.parse_revisions}，分块 {plan.chunks}，"
+            f"定位 {plan.chunk_spans}，脱敏映射 {plan.redaction_entities}"
+        )
+    print(f"  解除引用的版本：{list(report.detach_versions) or '无'}")
+    print(f"  仍无原件而删除的版本：{list(report.remove_versions) or '无'}")
+    print(f"  随之删除的法律本体：{list(report.remove_instruments) or '无'}")
+    print(f"  用这些原件重建版本树：{list(report.relink_from) or '无'}")
+    if dry_run:
+        print("  这是预演，未改动任何数据；确认后去掉 --dry-run 再执行。")
 
 
 async def import_documents(
@@ -154,6 +220,25 @@ async def import_documents(
     print(f"Imported {imported}, skipped {skipped}, failed {failed}.")
     if failed:
         sys.exit(1)
+
+
+async def set_document_source(username: str, document_id: UUID, source_id: UUID) -> None:
+    """更正原件来源归属；需 source.manage，变更写审计（设计 §20.3）。"""
+    async with SessionFactory() as session:
+        try:
+            async with session.begin():
+                principal = await cli_principal(session, username, SOURCE_MANAGE)
+            artifact = await documents_service.set_source(
+                session, principal, document_id, source_id
+            )
+            async with session.begin():
+                target = await sources_service.get_source(session, artifact.source_id)
+                label = f"{target.name} ({target.id})"
+        except HTTPException as error:
+            sys.exit(f"{error.status_code}: {error.detail}")
+        finally:
+            await engine.dispose()
+    print(f"Document {artifact.id} now belongs to source {label}")
 
 
 def _pg_env_and_args(database_url: str) -> tuple[dict, list[str]]:
@@ -370,6 +455,38 @@ async def reset_mfa(username: str) -> None:
     print(f"MFA reset for {user.username}; all sessions revoked. Re-enroll at next login.")
 
 
+async def run_worker(once: bool, poll_seconds: float | None) -> None:
+    """按需启动单进程 worker（设计 §3.1、§14.2）。worker 不绕过权限，也无需用户身份。"""
+    settings = get_settings()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    storage = get_storage()
+    common = {
+        "lease_seconds": settings.worker_lease_seconds,
+        "backoff_base": settings.worker_backoff_base_seconds,
+        "backoff_max": settings.worker_backoff_max_seconds,
+    }
+    try:
+        if once:
+            processed = await worker_runner.run_once(
+                SessionFactory, storage, worker_id=worker_runner.new_worker_id(), **common
+            )
+            print("processed one job" if processed else "no job available")
+        else:
+            await worker_runner.run_forever(
+                SessionFactory,
+                storage,
+                poll_seconds=poll_seconds or settings.worker_poll_seconds,
+                **common,
+            )
+    except KeyboardInterrupt:
+        print("\nworker stopped")
+    finally:
+        await engine.dispose()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m app.cli")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -419,6 +536,50 @@ def main() -> None:
         choices=("organization", "restricted"),
     )
 
+    set_source = commands.add_parser(
+        "set-document-source",
+        help="更正已导入原件的来源归属（FR-01；需 source.manage，变更写审计）",
+    )
+    set_source.add_argument("--as", dest="actor", required=True, help="执行操作的用户名")
+    set_source.add_argument("--document", required=True, type=UUID, help="原件 ID")
+    set_source.add_argument("--source", required=True, type=UUID, help="目标来源 ID")
+
+    update = commands.add_parser(
+        "update-source",
+        help="更正来源登记信息（FR-01；需 source.manage，变更写审计）",
+    )
+    update.add_argument("--as", dest="actor", required=True, help="执行操作的用户名")
+    update.add_argument("--source", required=True, type=UUID, help="来源 ID")
+    update.add_argument("--name")
+    update.add_argument("--type", choices=SOURCE_TYPES)
+    update.add_argument("--trust", choices=TRUST_LEVELS)
+    update.add_argument("--license-note", help="授权说明（不允许清空）")
+    update.add_argument("--url")
+    update.add_argument("--publisher")
+    update.add_argument(
+        "--last-checked-at",
+        type=datetime.fromisoformat,
+        help="来源最后核查时间（ISO 8601，带时区）；未核查时不填",
+    )
+
+    withdraw = commands.add_parser(
+        "withdraw-document",
+        help="整批撤下原件及其解析产物（设计 §15.3；需 source.manage，操作写审计）",
+    )
+    withdraw.add_argument("--as", dest="actor", required=True, help="执行操作的用户名")
+    withdraw.add_argument(
+        "--document", action="append", type=UUID, default=[], help="原件 ID，可重复"
+    )
+    withdraw.add_argument("--from-source", type=UUID, help="撤下该来源下的全部原件")
+    withdraw.add_argument("--reason", required=True, help="撤下原因（写入审计）")
+    withdraw.add_argument("--dry-run", action="store_true", help="只输出将删除的内容，不改动数据")
+
+    worker = commands.add_parser(
+        "run-worker", help="按需启动单进程 worker，领取并处理后台任务（设计 12.2）"
+    )
+    worker.add_argument("--once", action="store_true", help="只处理一个任务后退出")
+    worker.add_argument("--poll-seconds", type=float, default=None, help="无任务时的轮询间隔（秒）")
+
     args = parser.parse_args()
 
     if args.command == "backup":
@@ -433,6 +594,10 @@ def main() -> None:
 
     if args.command == "reset-mfa":
         asyncio.run(reset_mfa(args.username))
+        return
+
+    if args.command == "run-worker":
+        asyncio.run(run_worker(args.once, args.poll_seconds))
         return
 
     if args.command == "create-source":
@@ -461,6 +626,42 @@ def main() -> None:
                 args.dir,
                 args.sensitivity,
                 args.access_scope,
+            )
+        )
+        return
+
+    if args.command == "set-document-source":
+        asyncio.run(set_document_source(args.actor, args.document, args.source))
+        return
+
+    if args.command == "update-source":
+        # 只提交实际给出的字段；未给出的保持不变（--url "" 会因校验失败而被拒）
+        payload = {
+            field: value
+            for field, value in {
+                "name": args.name,
+                "source_type": args.type,
+                "trust_level": args.trust,
+                "license_note": args.license_note,
+                "url": args.url,
+                "publisher": args.publisher,
+                "last_checked_at": args.last_checked_at,
+            }.items()
+            if value is not None
+        }
+        try:
+            data = UpdateSource(**payload)
+        except ValidationError as error:
+            sys.exit(str(error))
+        asyncio.run(update_source(args.actor, args.source, data))
+        return
+
+    if args.command == "withdraw-document":
+        if not args.document and args.from_source is None:
+            sys.exit("Give --document (repeatable) or --from-source")
+        asyncio.run(
+            withdraw_documents_command(
+                args.actor, args.document, args.from_source, args.reason, args.dry_run
             )
         )
         return

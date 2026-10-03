@@ -33,6 +33,12 @@ class SetAccessScope(BaseModel):
     access_scope: AccessScope
 
 
+class SetDocumentSource(BaseModel):
+    """更正原件的来源归属（FR-01）；目标来源必须已登记授权说明（设计 §20.3）。"""
+
+    source_id: UUID
+
+
 class JobOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

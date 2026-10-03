@@ -285,6 +285,14 @@ export default function App() {
         }
       />
 
+      <Alert
+        className="section"
+        type="info"
+        showIcon
+        message="本系统是法律信息辅助工具，输出不构成法律意见"
+        description="仅用于机构内部的法律资料管理与研究，不提供法律服务，也不替代执业律师的判断。检索结果、Wiki 内容与问答结论均须经人工审核后方可使用。"
+      />
+
       {user ? (
         <Card title="当前用户" className="section">
           <Space wrap>

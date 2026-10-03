@@ -1,2 +1,5 @@
 # 本机运行产生的日志（legalmind/ 内的忽略规则见 legalmind/.gitignore）
 *.log
+
+# 原始法律资料不提交仓库（CLAUDE.md 敏感信息规则）
+法律文献/

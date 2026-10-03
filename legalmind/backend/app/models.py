@@ -19,6 +19,12 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
 
+# 数据约束策略（设计 5.3「用明确的数据约束防止重复版本和孤立引用」）：
+# 业务表的 organization_id 与"人"的引用列（created_by / author_id / granted_by / actor_id）
+# 一律建外键，ondelete 统一 RESTRICT——不隐式级联删除，物理删除交由设计 15.3 的显式删除流程。
+# 例外：resource_id 是多态引用（access_grants.resource_id、audit_events.resource_id），
+# 无法建外键，由应用层保证一致性。
+
 
 class WikiPage(Base):
     __tablename__ = "wiki_pages"
@@ -37,7 +43,10 @@ class WikiPage(Base):
         primary_key=True,
         default=uuid4,
     )
-    organization_id: Mapped[UUID] = mapped_column(index=True)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        index=True,
+    )
     title: Mapped[str] = mapped_column(String(200))
     head_revision: Mapped[int] = mapped_column(Integer)
     # organization：同组织有角色权限者可访问；restricted：还需 AccessGrant
@@ -85,7 +94,7 @@ class WikiRevision(Base):
         String(30),
         default="draft",
     )
-    author_id: Mapped[UUID]
+    author_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -104,9 +113,15 @@ class AuditEvent(Base):
         primary_key=True,
         default=uuid4,
     )
-    organization_id: Mapped[UUID] = mapped_column(index=True)
-    # 匿名操作（如未登录者的失败登录）没有操作者
-    actor_id: Mapped[UUID | None]
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    # 匿名操作（如未登录者的失败登录）没有操作者；有操作者时必须是真实用户
+    actor_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
     action: Mapped[str] = mapped_column(String(100))
     resource_id: Mapped[UUID]
     payload: Mapped[dict] = mapped_column(JSONB)
@@ -124,7 +139,10 @@ class OutboxEvent(Base):
         primary_key=True,
         default=uuid4,
     )
-    organization_id: Mapped[UUID] = mapped_column(index=True)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        index=True,
+    )
     event_type: Mapped[str] = mapped_column(String(100))
     payload: Mapped[dict] = mapped_column(JSONB)
 
@@ -280,14 +298,18 @@ class AccessGrant(Base):
         primary_key=True,
         default=uuid4,
     )
-    organization_id: Mapped[UUID] = mapped_column(index=True)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        index=True,
+    )
     resource_type: Mapped[str] = mapped_column(String(30))
+    # 多态引用（wiki_page 或 document），无法建外键，由应用层保证一致性
     resource_id: Mapped[UUID]
     user_id: Mapped[UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
         index=True,
     )
-    granted_by: Mapped[UUID]
+    granted_by: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -319,7 +341,10 @@ class Source(Base):
         primary_key=True,
         default=uuid4,
     )
-    organization_id: Mapped[UUID] = mapped_column(index=True)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        index=True,
+    )
     name: Mapped[str] = mapped_column(String(200))
     source_type: Mapped[str] = mapped_column(String(20))
     trust_level: Mapped[str] = mapped_column(String(20))
@@ -331,7 +356,7 @@ class Source(Base):
         DateTime(timezone=True),
         nullable=True,
     )
-    created_by: Mapped[UUID]
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -361,7 +386,10 @@ class SourceArtifact(Base):
         primary_key=True,
         default=uuid4,
     )
-    organization_id: Mapped[UUID] = mapped_column(index=True)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        index=True,
+    )
     source_id: Mapped[UUID] = mapped_column(
         ForeignKey("sources.id", ondelete="RESTRICT"),
         index=True,
@@ -380,7 +408,7 @@ class SourceArtifact(Base):
         DateTime(timezone=True),
         nullable=True,
     )
-    created_by: Mapped[UUID]
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -423,7 +451,10 @@ class Job(Base):
         primary_key=True,
         default=uuid4,
     )
-    organization_id: Mapped[UUID] = mapped_column(index=True)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        index=True,
+    )
     job_type: Mapped[str] = mapped_column(String(50))
     payload: Mapped[dict] = mapped_column(JSONB)
     # 组织 + 文件哈希 + 任务类型 + 处理配置版本（设计 7.1）

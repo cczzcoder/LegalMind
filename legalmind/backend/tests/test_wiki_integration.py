@@ -10,19 +10,55 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import DBAPIError
 
 from app.core.database import get_session
-from app.core.security import Principal, get_principal
+from app.core.security import Principal, get_principal, hash_password
 from app.main import app
-from app.models import AuditEvent, OutboxEvent, WikiPage, WikiRevision
+from app.models import (
+    AuditEvent,
+    Organization,
+    OutboxEvent,
+    User,
+    UserRole,
+    WikiPage,
+    WikiRevision,
+)
 from app.modules.authorization import grants
 from app.modules.wiki import service
 from app.modules.wiki.schemas import CreatePage, CreateRevision
+from tests.helpers import PASSWORD
 
 pytestmark = pytest.mark.anyio
 
 
-def new_principal() -> Principal:
-    # 每个测试使用随机组织，测试之间互不干扰
-    return Principal(organization_id=uuid4(), user_id=uuid4(), roles=frozenset({"editor"}))
+@pytest.fixture
+def new_principal(session_factory):
+    """创建真实组织与用户后返回其 Principal。
+
+    organization_id / user_id 必须指向真实行，否则违反设计 5.3 的外键约束。
+    直接建行而不用 service.create_user：后者会写入 user.created 审计事件，
+    干扰按 organization_id 计数的断言。
+    """
+
+    async def make(*roles: str) -> Principal:
+        async with session_factory() as session, session.begin():
+            organization = Organization(name=f"org-{uuid4()}")
+            session.add(organization)
+            await session.flush()
+            user = User(
+                organization_id=organization.id,
+                username=f"u-{uuid4().hex[:12]}",
+                password_hash=hash_password(PASSWORD),
+                is_active=True,
+            )
+            session.add(user)
+            await session.flush()
+            session.add_all(UserRole(user_id=user.id, role=role) for role in roles)
+            return Principal(
+                organization_id=organization.id,
+                user_id=user.id,
+                roles=frozenset(roles),
+            )
+
+    return make
 
 
 async def count(session_factory, model, organization_id: UUID) -> int:
@@ -52,8 +88,9 @@ def client_as(session_factory):
     app.dependency_overrides.clear()
 
 
-async def test_other_organization_cannot_see_or_edit_page(client_as):
-    owner, outsider = new_principal(), new_principal()
+async def test_other_organization_cannot_see_or_edit_page(client_as, new_principal):
+    owner = await new_principal("editor")
+    outsider = await new_principal("editor")
 
     async with client_as(owner) as client:
         created = await client.post(
@@ -82,8 +119,10 @@ async def test_other_organization_cannot_see_or_edit_page(client_as):
     assert [rev["number"] for rev in history.json()] == [1]
 
 
-async def test_outbox_failure_rolls_back_page_and_audit(session_factory, monkeypatch):
-    principal = new_principal()
+async def test_outbox_failure_rolls_back_page_and_audit(
+    session_factory, monkeypatch, new_principal
+):
+    principal = await new_principal("editor")
 
     def broken_outbox_event(**kwargs):
         # event_type 超过 VARCHAR(100)，在数据库层写入失败
@@ -104,8 +143,8 @@ async def test_outbox_failure_rolls_back_page_and_audit(session_factory, monkeyp
     assert await count(session_factory, OutboxEvent, principal.organization_id) == 0
 
 
-async def test_concurrent_edits_on_same_revision_only_one_wins(session_factory):
-    principal = new_principal()
+async def test_concurrent_edits_on_same_revision_only_one_wins(session_factory, new_principal):
+    principal = await new_principal("editor")
 
     async with session_factory() as session:
         first = await service.create_page(

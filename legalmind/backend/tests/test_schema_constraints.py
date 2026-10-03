@@ -25,7 +25,8 @@ from app.models import (
 
 pytestmark = pytest.mark.anyio
 
-# (表, 列, 目标表)，与迁移 0006 / 0007 / 0008 一致
+# (表, 列, 目标表)，与迁移 0006 / 0007 / 0008 / 0010 一致
+# 公共法律数据表不设组织字段（设计 21.2），故不在此列
 EXPECTED_FOREIGN_KEYS = (
     ("wiki_pages", "organization_id", "organizations"),
     ("wiki_revisions", "author_id", "users"),
@@ -39,31 +40,23 @@ EXPECTED_FOREIGN_KEYS = (
     ("source_artifacts", "organization_id", "organizations"),
     ("source_artifacts", "created_by", "users"),
     ("jobs", "organization_id", "organizations"),
-    ("parse_revisions", "organization_id", "organizations"),
     ("parse_revisions", "artifact_id", "source_artifacts"),
     ("parse_revisions", "created_by", "users"),
-    ("chunks", "organization_id", "organizations"),
     ("chunks", "parse_revision_id", "parse_revisions"),
     ("chunk_spans", "chunk_id", "chunks"),
-    ("legal_instruments", "organization_id", "organizations"),
     ("legal_instruments", "created_by", "users"),
-    ("legal_versions", "organization_id", "organizations"),
     ("legal_versions", "instrument_id", "legal_instruments"),
     ("legal_versions", "artifact_id", "source_artifacts"),
     ("legal_versions", "created_by", "users"),
-    ("provision_identities", "organization_id", "organizations"),
     ("provision_identities", "instrument_id", "legal_instruments"),
     ("provision_identities", "created_by", "users"),
-    ("provision_versions", "organization_id", "organizations"),
     ("provision_versions", "legal_version_id", "legal_versions"),
     ("provision_versions", "provision_identity_id", "provision_identities"),
     ("provision_versions", "chunk_id", "chunks"),
     ("provision_versions", "created_by", "users"),
-    ("provision_relations", "organization_id", "organizations"),
     ("provision_relations", "source_identity_id", "provision_identities"),
     ("provision_relations", "target_identity_id", "provision_identities"),
     ("provision_relations", "created_by", "users"),
-    ("applicability_records", "organization_id", "organizations"),
     ("applicability_records", "provision_identity_id", "provision_identities"),
     ("applicability_records", "confirmed_by", "users"),
     ("applicability_records", "created_by", "users"),
@@ -116,7 +109,6 @@ async def _seed_parse_chain(session) -> Chunk:
     await session.flush()
 
     parse_revision = ParseRevision(
-        organization_id=organization.id,
         artifact_id=artifact.id,
         parser="test-parser",
         parser_version="1",
@@ -129,7 +121,6 @@ async def _seed_parse_chain(session) -> Chunk:
     await session.flush()
 
     chunk = Chunk(
-        organization_id=organization.id,
         parse_revision_id=parse_revision.id,
         ordinal=0,
         text="第一条 测试条文",
@@ -222,7 +213,6 @@ async def _seed_two_identities(session) -> tuple[ProvisionIdentity, ProvisionIde
     await session.flush()
 
     instrument = LegalInstrument(
-        organization_id=organization.id,
         title="测试法",
         jurisdiction="CN",
         issuing_body="测试机关",
@@ -233,14 +223,12 @@ async def _seed_two_identities(session) -> tuple[ProvisionIdentity, ProvisionIde
     await session.flush()
 
     first = ProvisionIdentity(
-        organization_id=organization.id,
         instrument_id=instrument.id,
         provision_type="article",
         provision_number="第一条",
         created_by=user.id,
     )
     second = ProvisionIdentity(
-        organization_id=organization.id,
         instrument_id=instrument.id,
         provision_type="article",
         provision_number="第二条",
@@ -257,7 +245,6 @@ async def test_provision_relation_rejects_self_reference(session_factory):
         first, _ = await _seed_two_identities(session)
         session.add(
             ProvisionRelation(
-                organization_id=first.organization_id,
                 source_identity_id=first.id,
                 target_identity_id=first.id,
                 relation_type="supersede",

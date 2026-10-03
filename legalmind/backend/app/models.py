@@ -21,8 +21,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.core.database import Base
 
 # 数据约束策略（设计 5.3「用明确的数据约束防止重复版本和孤立引用」）：
-# 业务表的 organization_id 与"人"的引用列（created_by / author_id / granted_by / actor_id）
-# 一律建外键，ondelete 统一 RESTRICT——不隐式级联删除，物理删除交由设计 15.3 的显式删除流程。
+# "人"的引用列（created_by / author_id / granted_by / actor_id）一律建外键，ondelete 统一
+# RESTRICT——不隐式级联删除，物理删除交由设计 15.3 的显式删除流程。
+# 组织字段只出现在用户私有数据表上（设计 21.2）；公共法律数据表全局共享，不设组织字段。
 # 例外：resource_id 是多态引用（access_grants.resource_id、audit_events.resource_id），
 # 无法建外键，由应用层保证一致性。
 
@@ -511,10 +512,6 @@ class ParseRevision(Base):
         primary_key=True,
         default=uuid4,
     )
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organizations.id", ondelete="RESTRICT"),
-        index=True,
-    )
     artifact_id: Mapped[UUID] = mapped_column(
         ForeignKey("source_artifacts.id", ondelete="RESTRICT"),
         index=True,
@@ -546,10 +543,6 @@ class Chunk(Base):
     id: Mapped[UUID] = mapped_column(
         primary_key=True,
         default=uuid4,
-    )
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organizations.id", ondelete="RESTRICT"),
-        index=True,
     )
     parse_revision_id: Mapped[UUID] = mapped_column(
         ForeignKey("parse_revisions.id", ondelete="RESTRICT"),
@@ -629,8 +622,8 @@ class LegalInstrument(Base):
 
     __tablename__ = "legal_instruments"
     __table_args__ = (
-        # 同组织内稳定 ID 唯一；为空时允许多行（PostgreSQL 中 NULL 互不相等）
-        UniqueConstraint("organization_id", "stable_id", name="uq_legal_instrument_stable_id"),
+        # 公共法律数据全局共享（设计 21.2）；稳定 ID 全库唯一
+        UniqueConstraint("stable_id", name="uq_legal_instrument_stable_id"),
         CheckConstraint(
             _in("instrument_type", LEGAL_INSTRUMENT_TYPES),
             name="ck_legal_instrument_type",
@@ -640,10 +633,6 @@ class LegalInstrument(Base):
     id: Mapped[UUID] = mapped_column(
         primary_key=True,
         default=uuid4,
-    )
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organizations.id", ondelete="RESTRICT"),
-        index=True,
     )
     title: Mapped[str] = mapped_column(String(500))
     # 法域
@@ -682,10 +671,6 @@ class LegalVersion(Base):
     id: Mapped[UUID] = mapped_column(
         primary_key=True,
         default=uuid4,
-    )
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organizations.id", ondelete="RESTRICT"),
-        index=True,
     )
     instrument_id: Mapped[UUID] = mapped_column(
         ForeignKey("legal_instruments.id", ondelete="RESTRICT"),
@@ -731,10 +716,6 @@ class ProvisionIdentity(Base):
         primary_key=True,
         default=uuid4,
     )
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organizations.id", ondelete="RESTRICT"),
-        index=True,
-    )
     instrument_id: Mapped[UUID] = mapped_column(
         ForeignKey("legal_instruments.id", ondelete="RESTRICT"),
         index=True,
@@ -769,10 +750,6 @@ class ProvisionVersion(Base):
     id: Mapped[UUID] = mapped_column(
         primary_key=True,
         default=uuid4,
-    )
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organizations.id", ondelete="RESTRICT"),
-        index=True,
     )
     legal_version_id: Mapped[UUID] = mapped_column(
         ForeignKey("legal_versions.id", ondelete="RESTRICT"),
@@ -845,10 +822,6 @@ class ProvisionRelation(Base):
         primary_key=True,
         default=uuid4,
     )
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organizations.id", ondelete="RESTRICT"),
-        index=True,
-    )
     source_identity_id: Mapped[UUID] = mapped_column(
         ForeignKey("provision_identities.id", ondelete="RESTRICT"),
         index=True,
@@ -881,10 +854,6 @@ class ApplicabilityRecord(Base):
     id: Mapped[UUID] = mapped_column(
         primary_key=True,
         default=uuid4,
-    )
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organizations.id", ondelete="RESTRICT"),
-        index=True,
     )
     provision_identity_id: Mapped[UUID] = mapped_column(
         ForeignKey("provision_identities.id", ondelete="RESTRICT"),

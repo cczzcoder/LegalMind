@@ -3,3 +3,6 @@
 
 # 原始法律资料不提交仓库（CLAUDE.md 敏感信息规则）
 法律文献/
+
+# WorkBuddy 工作区辅助数据（本机记忆，不提交仓库）
+.workbuddy-ai/

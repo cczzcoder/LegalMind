@@ -228,7 +228,7 @@ npm run build                # 内含 tsc --noEmit
 | 项 | 现状 | 差距 |
 | --- | --- | --- |
 | 后端 lint | `ruff check` + `ruff format --check` 通过 | 无 CI 自动执行（仅本地） |
-| 后端测试 | 108 项通过（含集成、权限矩阵） | 无覆盖率要求 |
+| 后端测试 | 110 项通过（含集成、权限矩阵） | 无覆盖率要求 |
 | 前端 | `tsc --noEmit` + build + `eslint` + `prettier --check` | 无前端测试 |
 | CI | **无** | 最大缺口 |
 | 提交钩子 | **无** | 无 pre-commit |

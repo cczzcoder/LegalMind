@@ -23,6 +23,8 @@ ruff format --check .
 pytest                      # 是否设置了 TEST_DATABASE_URL？集成测试是否真的跑了？
 
 # 前端
+npm run lint
+npm run format:check
 npm run build
 ```
 

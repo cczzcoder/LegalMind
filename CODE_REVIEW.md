@@ -138,6 +138,8 @@ ruff format --check .        # 格式基线（2026-10-03 引入）
 pytest                       # 设 TEST_DATABASE_URL 才会跑集成测试
 
 # 前端（在 legalmind/frontend 下）
+npm run lint                 # eslint
+npm run format:check         # prettier
 npm run build                # 内含 tsc --noEmit
 ```
 
@@ -147,7 +149,6 @@ npm run build                # 内含 tsc --noEmit
 | --- | --- | --- |
 | pre-commit | 提交前自动跑 lint/format | 开发机钩子，防止脏代码进 PR |
 | CI（GitHub Actions） | 每个 PR 自动跑 lint + 测试 | 仓库当前**无 CI**，是最大缺口 |
-| eslint + prettier | 前端静态检查 | 当前前端**无 lint、无测试** |
 | 依赖锁定 | 生成锁文件、固定镜像摘要 | README 已列为待办 |
 
 > 上述引入前需确认：CI 运行环境、是否允许联网拉依赖、是否需要镜像加速。**未确认前不擅自添加。**
@@ -227,8 +228,8 @@ npm run build                # 内含 tsc --noEmit
 | 项 | 现状 | 差距 |
 | --- | --- | --- |
 | 后端 lint | `ruff check` + `ruff format --check` 通过 | 无 CI 自动执行（仅本地） |
-| 后端测试 | 107 项通过（含集成、权限矩阵） | 无覆盖率要求 |
-| 前端 | `tsc --noEmit` + build | **无 eslint/prettier、无测试** |
+| 后端测试 | 108 项通过（含集成、权限矩阵） | 无覆盖率要求 |
+| 前端 | `tsc --noEmit` + build + `eslint` + `prettier --check` | 无前端测试 |
 | CI | **无** | 最大缺口 |
 | 提交钩子 | **无** | 无 pre-commit |
 | PR 模板 | **无**（本规范新增） | — |

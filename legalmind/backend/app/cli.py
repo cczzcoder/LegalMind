@@ -17,7 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 from uuid import UUID
@@ -165,10 +165,10 @@ def _pg_env_and_args(database_url: str) -> tuple[dict, list[str]]:
 
 def do_backup(dest: Path, label: str | None, settings=None) -> None:
     if settings is None:
-        from app.core.config import get_settings  # noqa: PLC0415 — 避免在测试中触发 DB 验证
+        from app.core.config import get_settings  # 延迟导入，避免在测试中触发 DB 验证
         settings = get_settings()
     if label is None:
-        label = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        label = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
     backup_dir = dest / label
     if backup_dir.exists():
@@ -182,7 +182,7 @@ def do_backup(dest: Path, label: str | None, settings=None) -> None:
     print(f"导出数据库 → {dump_path} …")
     result = subprocess.run(
         ["pg_dump", "--format=custom", "-f", str(dump_path)] + conn_args + [db_name],
-        env=env, capture_output=True, text=True,
+        env=env, capture_output=True, text=True, check=False,
     )
     if result.returncode != 0:
         shutil.rmtree(backup_dir, ignore_errors=True)
@@ -209,7 +209,7 @@ def do_backup(dest: Path, label: str | None, settings=None) -> None:
     )
     (backup_dir / "backup_meta.json").write_text(
         json.dumps({
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
             "label": label,
             "artifact_count": len(entries),
             "db_size_bytes": dump_path.stat().st_size,
@@ -226,7 +226,7 @@ def do_restore(
     settings=None,
 ) -> None:
     if settings is None:
-        from app.core.config import get_settings  # noqa: PLC0415
+        from app.core.config import get_settings
         settings = get_settings()
     db_url = database_url or settings.database_url
     storage_root = Path(storage_root_override or settings.storage_root).resolve()
@@ -269,7 +269,7 @@ def do_restore(
     print(f"恢复数据库 {db_name!r} …")
     result = subprocess.run(
         ["pg_restore", "--clean", "--if-exists", "-d", db_name] + conn_args + [str(src / "db.dump")],
-        env=env, capture_output=True, text=True,
+        env=env, capture_output=True, text=True, check=False,
     )
     # pg_restore 仅当 exit > 1 时才是真实错误（exit 1 可能只是警告）
     if result.returncode > 1:

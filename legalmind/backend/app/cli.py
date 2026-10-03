@@ -27,6 +27,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 
 from app.adapters.storage import get_storage
+from app.core.config import get_settings
 from app.core.database import SessionFactory, engine
 from app.core.security import Principal
 from app.models import (
@@ -108,6 +109,8 @@ async def import_documents(
     if not files:
         sys.exit(f"No files in {directory}")
 
+    # 与 API 入口使用同一上限，避免把超大文件整个读进内存（设计 14.2）
+    max_bytes = get_settings().max_upload_bytes
     imported = skipped = failed = 0
     async with SessionFactory() as session:
         try:
@@ -115,6 +118,11 @@ async def import_documents(
                 principal = await cli_principal(session, username, DOCUMENT_WRITE)
             for path in files:
                 # 逐个文件独立事务，单个失败不影响其他文件；重复文件跳过而不是重复登记
+                size = path.stat().st_size
+                if size > max_bytes:
+                    failed += 1
+                    print(f"FAIL  {path.name}: {size} bytes exceeds MAX_UPLOAD_BYTES={max_bytes}")
+                    continue
                 try:
                     artifact, job = await documents_service.import_document(
                         session,

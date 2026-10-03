@@ -22,7 +22,7 @@ from app.models import (
 
 pytestmark = pytest.mark.anyio
 
-# (表, 列, 目标表)，与迁移 0006 / 0007 一致
+# (表, 列, 目标表)，与迁移 0006 / 0007 / 0008 一致
 EXPECTED_FOREIGN_KEYS = (
     ("wiki_pages", "organization_id", "organizations"),
     ("wiki_revisions", "author_id", "users"),
@@ -42,6 +42,20 @@ EXPECTED_FOREIGN_KEYS = (
     ("chunks", "organization_id", "organizations"),
     ("chunks", "parse_revision_id", "parse_revisions"),
     ("chunk_spans", "chunk_id", "chunks"),
+    ("legal_instruments", "organization_id", "organizations"),
+    ("legal_instruments", "created_by", "users"),
+    ("legal_versions", "organization_id", "organizations"),
+    ("legal_versions", "instrument_id", "legal_instruments"),
+    ("legal_versions", "artifact_id", "source_artifacts"),
+    ("legal_versions", "created_by", "users"),
+    ("provision_identities", "organization_id", "organizations"),
+    ("provision_identities", "instrument_id", "legal_instruments"),
+    ("provision_identities", "created_by", "users"),
+    ("provision_versions", "organization_id", "organizations"),
+    ("provision_versions", "legal_version_id", "legal_versions"),
+    ("provision_versions", "provision_identity_id", "provision_identities"),
+    ("provision_versions", "chunk_id", "chunks"),
+    ("provision_versions", "created_by", "users"),
 )
 
 

@@ -1,10 +1,11 @@
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -606,3 +607,194 @@ class ChunkSpan(Base):
     coordinate_system: Mapped[str | None] = mapped_column(String(30), nullable=True)
     bbox: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     text_sha256: Mapped[str] = mapped_column(String(64))
+
+
+# 资料类型；暂定，随来源清单与数据分级确认后调整（需求 2.2）
+LEGAL_INSTRUMENT_TYPES = (
+    "constitution",
+    "law",
+    "administrative_regulation",
+    "judicial_interpretation",
+    "local_regulation",
+    "department_rule",
+    "other",
+)
+# 条款层级：编/章/节/条/款/项/目
+PROVISION_TYPES = ("part", "chapter", "section", "article", "paragraph", "item", "subitem")
+LEGAL_VERSION_REVIEW_STATUSES = ("pending", "approved", "rejected")
+
+
+class LegalInstrument(Base):
+    """法律法规本体（设计 5.1）。稳定身份跨版本不变。"""
+
+    __tablename__ = "legal_instruments"
+    __table_args__ = (
+        # 同组织内稳定 ID 唯一；为空时允许多行（PostgreSQL 中 NULL 互不相等）
+        UniqueConstraint("organization_id", "stable_id", name="uq_legal_instrument_stable_id"),
+        CheckConstraint(
+            _in("instrument_type", LEGAL_INSTRUMENT_TYPES),
+            name="ck_legal_instrument_type",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        primary_key=True,
+        default=uuid4,
+    )
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    title: Mapped[str] = mapped_column(String(500))
+    # 法域
+    jurisdiction: Mapped[str] = mapped_column(String(100))
+    # 制定机关
+    issuing_body: Mapped[str] = mapped_column(String(200))
+    instrument_type: Mapped[str] = mapped_column(String(50))
+    # 文号，原样保存；规范化字段待设计 8.3 的精确检索定型后再加
+    document_number: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # 外部权威稳定标识
+    stable_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+
+class LegalVersion(Base):
+    """法律版本（设计 5.1、5.2）。
+
+    效力日期用 Date 并按法律日期处理；未知即 NULL，不虚构（设计 5.3）。
+    不施加“不允许时间重叠”约束——复杂适用关系由 ApplicabilityRecord 表达（设计 5.3）。
+    """
+
+    __tablename__ = "legal_versions"
+    __table_args__ = (
+        UniqueConstraint("instrument_id", "version_label", name="uq_legal_version_label"),
+        CheckConstraint(
+            _in("review_status", LEGAL_VERSION_REVIEW_STATUSES),
+            name="ck_legal_version_review_status",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        primary_key=True,
+        default=uuid4,
+    )
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    instrument_id: Mapped[UUID] = mapped_column(
+        ForeignKey("legal_instruments.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    # 该版本对应的原件；允许先登记版本、后导入文件
+    artifact_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("source_artifacts.id", ondelete="RESTRICT"),
+        index=True,
+        nullable=True,
+    )
+    version_label: Mapped[str] = mapped_column(String(100))
+    # 公布日期；未知为 NULL
+    promulgated_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # 生效日期；未知为 NULL
+    effective_from: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # 失效日期；未知为 NULL
+    effective_to: Mapped[date | None] = mapped_column(Date, nullable=True)
+    review_status: Mapped[str] = mapped_column(String(30), default="pending")
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+
+class ProvisionIdentity(Base):
+    """条款稳定身份（设计 5.1、5.2）。身份跨法律版本不变，版本承载文本。"""
+
+    __tablename__ = "provision_identities"
+    __table_args__ = (
+        UniqueConstraint(
+            "instrument_id",
+            "provision_type",
+            "provision_number",
+            name="uq_provision_identity",
+        ),
+        CheckConstraint(_in("provision_type", PROVISION_TYPES), name="ck_provision_identity_type"),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        primary_key=True,
+        default=uuid4,
+    )
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    instrument_id: Mapped[UUID] = mapped_column(
+        ForeignKey("legal_instruments.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    provision_type: Mapped[str] = mapped_column(String(30))
+    # 条号，原样保存（如“第一条”）；规范化条号待设计 8.3 定型后再加
+    provision_number: Mapped[str] = mapped_column(String(100))
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+
+class ProvisionVersion(Base):
+    """条款在某个法律版本下的文本与结构位置（设计 5.1、5.2）。
+
+    引用绑定到本表的具体行，而不是“最新条款”（设计 5.3）。
+    """
+
+    __tablename__ = "provision_versions"
+    __table_args__ = (
+        # 同一法律版本下，一个条款身份只有一份文本
+        UniqueConstraint(
+            "legal_version_id",
+            "provision_identity_id",
+            name="uq_provision_version",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        primary_key=True,
+        default=uuid4,
+    )
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    legal_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("legal_versions.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    provision_identity_id: Mapped[UUID] = mapped_column(
+        ForeignKey("provision_identities.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    # 承载本条款文本的分块；用于沿 chunk_spans 解析原文定位
+    chunk_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("chunks.id", ondelete="RESTRICT"),
+        index=True,
+        nullable=True,
+    )
+    # 结构路径（编/章/节/条…）；与 chunks.structure_path 同源，待法律结构定型
+    structure_path: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    text: Mapped[str] = mapped_column(Text)
+    text_sha256: Mapped[str] = mapped_column(String(64))
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )

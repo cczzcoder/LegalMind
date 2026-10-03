@@ -541,7 +541,9 @@ class Chunk(Base):
     )
     ordinal: Mapped[int] = mapped_column(Integer)
     # 结构范围（章/节/条路径）；法律结构映射待法律版本切片定型
-    structure_path: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # none_as_null：JSONB 默认把 Python None 存成 JSON null（不是 SQL NULL），会让
+    # "IS NULL" 判断失效；这里显式存 SQL NULL，语义才是"未知"
+    structure_path: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     text: Mapped[str] = mapped_column(Text)
     text_sha256: Mapped[str] = mapped_column(String(64))
 
@@ -589,7 +591,8 @@ class ChunkSpan(Base):
     char_start: Mapped[int] = mapped_column(Integer)
     char_end: Mapped[int] = mapped_column(Integer)
     coordinate_system: Mapped[str | None] = mapped_column(String(30), nullable=True)
-    bbox: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # none_as_null：与 ck_chunk_span_bbox_pair 约束一致，无 bbox 时存 SQL NULL 而非 JSON null
+    bbox: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     text_sha256: Mapped[str] = mapped_column(String(64))
 
 
@@ -606,6 +609,9 @@ LEGAL_INSTRUMENT_TYPES = (
 # 条款层级：编/章/节/条/款/项/目
 PROVISION_TYPES = ("part", "chapter", "section", "article", "paragraph", "item", "subitem")
 LEGAL_VERSION_REVIEW_STATUSES = ("pending", "approved", "rejected")
+# 版本效力状态（设计 5.1、8.3）。unknown 表示无法判定，不虚构（设计 5.3）；
+# 检索默认屏蔽 not_yet_effective（设计 8.3）。
+LEGAL_STATUSES = ("effective", "not_yet_effective", "repealed", "unknown")
 
 
 class LegalInstrument(Base):
@@ -615,6 +621,9 @@ class LegalInstrument(Base):
     __table_args__ = (
         # 公共法律数据全局共享（设计 21.2）；稳定 ID 全库唯一
         UniqueConstraint("stable_id", name="uq_legal_instrument_stable_id"),
+        # 可推导的业务身份：法域 + 名称（规范化后）。stable_id 依赖外部权威库，多为 NULL，
+        # 而 PostgreSQL 的唯一约束允许多个 NULL，故不能靠它去重（设计 8.3 的规范化字段）。
+        UniqueConstraint("jurisdiction", "title", name="uq_legal_instrument_title"),
         CheckConstraint(
             _in("instrument_type", LEGAL_INSTRUMENT_TYPES),
             name="ck_legal_instrument_type",
@@ -625,6 +634,7 @@ class LegalInstrument(Base):
         primary_key=True,
         default=uuid4,
     )
+    # 规范化后的名称（去《》、去空白）；身份键的一部分
     title: Mapped[str] = mapped_column(String(500))
     # 法域
     jurisdiction: Mapped[str] = mapped_column(String(100))
@@ -657,6 +667,7 @@ class LegalVersion(Base):
             _in("review_status", LEGAL_VERSION_REVIEW_STATUSES),
             name="ck_legal_version_review_status",
         ),
+        CheckConstraint(_in("legal_status", LEGAL_STATUSES), name="ck_legal_version_legal_status"),
     )
 
     id: Mapped[UUID] = mapped_column(
@@ -680,6 +691,11 @@ class LegalVersion(Base):
     effective_from: Mapped[date | None] = mapped_column(Date, nullable=True)
     # 失效日期；未知为 NULL
     effective_to: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # 效力状态：effective 当前有效 / not_yet_effective 已公布未生效 / repealed 已废止或被取代 /
+    # unknown 无法判定。由公布信息中的施行日期与同日法律版本比较推导（legal_corpus/metadata）。
+    legal_status: Mapped[str] = mapped_column(
+        String(30), default="unknown", server_default="unknown"
+    )
     review_status: Mapped[str] = mapped_column(String(30), default="pending")
     created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
 

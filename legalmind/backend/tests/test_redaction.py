@@ -11,7 +11,15 @@ from sqlalchemy import select
 from app.core.security import Principal
 from app.models import AuditEvent, RedactionEntity
 from app.modules.redaction.detector import DetectedEntity, RegexEntityDetector
-from app.modules.redaction.service import RedactedEntity, apply_redaction, redact, restore
+from app.modules.redaction.service import (
+    RedactedEntity,
+    RedactionSpan,
+    apply_redaction,
+    redact,
+    redact_spans,
+    redacted_slice,
+    restore,
+)
 from tests.helpers import seed_parse_chain
 
 SAMPLE = "身份证110101199001011234，案号（2023）京01民终1234号，电话13800138000。"
@@ -72,6 +80,60 @@ def test_overlapping_matches_are_replaced_once():
     redacted, entities = redact("0123456789abcdef", Overlapping())
     assert redacted == "[身份证_1]abcdef"
     assert len(entities) == 1
+
+
+# ---------------------------------------------------------------------------
+# 按原文本区间取脱敏切片（设计 21.3：入库脱敏文本、偏移指向原文本）
+# ---------------------------------------------------------------------------
+
+
+def test_redact_spans_reports_replaced_ranges():
+    redacted, entities, spans = redact_spans(SAMPLE)
+    assert redacted == redact(SAMPLE)[0]
+    assert [(span.start, span.end) for span in spans] == [
+        (3, 21),  # 110101199001011234
+        (24, 40),  # （2023）京01民终1234号
+        (43, 54),  # 13800138000
+    ]
+    # 每个 span 的区间确实等于它替换掉的原值
+    assert [SAMPLE[span.start : span.end] for span in spans] == [
+        entity.plaintext for entity in entities
+    ]
+    assert all(SAMPLE[span.start : span.end] != span.placeholder for span in spans)
+
+
+def test_redacted_slice_reassembles_the_redacted_text():
+    """按块区间切片再拼接，等于整篇脱敏文本（流水线的实际用法）。"""
+    text = "身份证110101199001011234\n第二条　联系电话13800138000"
+    _, _, spans = redact_spans(text)
+    # 块边界：第一块 [0, 21)，第二块 [22, 41)
+    pieces = [redacted_slice(text, spans, 0, 21), redacted_slice(text, spans, 22, 41)]
+    assert pieces == ["身份证[身份证_1]", "第二条　联系电话[电话_1]"]
+    assert "\n".join(pieces) == redact(text)[0]
+
+
+def test_redacted_slice_without_entities_returns_the_original_slice():
+    text = "第一条　没有个人信息的条文\n第二条　也没有"
+    assert redacted_slice(text, [], 0, 12) == text[0:12]
+    assert redacted_slice(text, [], 13, 19) == text[13:19]
+
+
+def test_straddling_span_never_leaks_plaintext():
+    """实体跨区间边界（当前识别器不会产生，属防御性行为）：占位符只出现一次，且不漏明文。
+
+    区间之间含被实体吞掉的字符时，拼接结果不再等于整篇脱敏文本——这是边界情形的固有代价，
+    但**任何一段区间都不会漏出明文**，这是必须守住的一条。
+    """
+    text = "abcde\nfghij"
+    spans = [RedactionSpan(start=3, end=8, placeholder="[X]")]  # 吞掉 "de\nfg"
+
+    left = redacted_slice(text, spans, 0, 5)
+    right = redacted_slice(text, spans, 6, 11)
+
+    assert left == "abc[X]"
+    assert right == "hij"
+    assert "defg" not in left + right
+    assert (left + right).count("[X]") == 1
 
 
 @pytest.mark.anyio

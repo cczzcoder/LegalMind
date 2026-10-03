@@ -7,6 +7,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -94,6 +95,10 @@ class WikiRevision(Base):
 
 class AuditEvent(Base):
     __tablename__ = "audit_events"
+    __table_args__ = (
+        # 管理员 MFA 失败计数按 actor_id + action + 时间窗查询（identity/mfa.py）
+        Index("ix_audit_events_actor_action_created", "actor_id", "action", "created_at"),
+    )
 
     id: Mapped[UUID] = mapped_column(
         primary_key=True,

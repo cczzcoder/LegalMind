@@ -12,7 +12,7 @@
 | 级别 | 数量 |
 | --- | --- |
 | `[BLOCK]` | 1（已修复，见 B1） |
-| `[MAJOR]` | 6（M1 已修复） |
+| `[MAJOR]` | 6（M1、M4、M5 已修复） |
 | `[MINOR]` | 10 |
 | `[NIT]` | 3 |
 
@@ -72,11 +72,15 @@ await to_thread.run_sync(storage.put, key, content, sha256)
 
 ### M4 审计表缺少查询索引
 
+> **已修复（2026-10-03）**：新增迁移 `0005_audit_event_index.py`，为 `audit_events` 建立 `(actor_id, action, created_at)` 复合索引；`models.py` 同步声明该索引。
+
 **位置**：`migrations/versions/0001_initial.py:78-98`（`audit_events` 仅建 `organization_id` 索引）
 **问题**：`app/modules/identity/mfa.py:79-90` 的 `check_failures` 按 `actor_id + action + created_at` 过滤，审计表无 `actor_id` / `created_at` 索引。该查询**每次 MFA 尝试都会执行**，而审计表只增不减。
 **建议**：新增迁移，建立 `(actor_id, action, created_at)` 复合索引。
 
 ### M5 统一错误响应与 trace_id 缺失
+
+> **已修复（2026-10-03）**：新增 `app/core/errors.py`——纯 ASGI 的 trace_id 中间件（生成并回写 `X-Trace-Id`）与统一错误体 `{code, message, trace_id}`（校验错误另带 `errors`）；未处理异常记录带 trace_id 的日志且不向客户端泄露细节。前端同步改为读取 `message`。原依赖 `{"detail": ...}` 的 3 处测试断言已改为比较与安全语义相关的字段（trace_id 每请求不同）。测试 107 项通过。
 
 **位置**：`app/main.py`（无异常处理器、无请求 ID 中间件）
 **问题**：设计 13 要求"错误返回统一包含 `code`、安全描述和 `trace_id`"，设计 16.1 要求请求/问答/任务可经 trace_id 关联。当前错误体为 FastAPI 默认 `{"detail": ...}`，无 trace_id。
@@ -132,7 +136,7 @@ await to_thread.run_sync(storage.put, key, content, sha256)
 
 1. ~~**B1**（阻塞 IO）~~ —— **已修复（2026-10-03）**。
 2. ~~**M1**~~（**已修复 2026-10-03**）、**M2** —— 触碰 R2 与恢复正确性。
-3. **M5、M4** —— 可观测性与查询性能，属基础设施补课。
+3. ~~**M5、M4**~~（**已修复 2026-10-03**）—— 可观测性与查询性能，属基础设施补课。
 4. **M3、M6** —— 能力补齐与入口一致性。
 5. **MINOR / NIT** —— 随日常改动顺带处理。
 

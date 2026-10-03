@@ -101,6 +101,8 @@ await to_thread.run_sync(storage.put, key, content, sha256)
 
 ## `[MINOR]` 作者自行决定
 
+> **已修复（2026-10-03，89a82df）**：m1、m3、m4、m5、m6、m8、m10 已处理，逐项状态见 `CODE_REVIEW_BACKLOG.md`。其中 **m1 未采用下表建议**——直接前置判空会跳过哈希校验、破坏时间恒定（用户枚举），实际改为保留 dummy 校验再显式判空。m2、m7 待办。
+
 | # | 位置 | 问题 | 建议 |
 | --- | --- | --- | --- |
 | m1 | `identity/service.py:102-104` | `verify_password(...) and user.is_active` 依赖短路求值规避 `user` 为 `None`；当前正确但脆弱 | 显式写成 `user is not None and verify_password(...) and user.is_active` |
@@ -155,7 +157,7 @@ await to_thread.run_sync(storage.put, key, content, sha256)
 2. ~~**M1**~~、~~**M2**~~（**均已修复 2026-10-03**）—— 触碰 R2 与恢复正确性。
 3. ~~**M5、M4**~~（**已修复 2026-10-03**）—— 可观测性与查询性能，属基础设施补课。
 4. ~~**M6**~~（**已修复 2026-10-03**）、**M3** —— 能力补齐与入口一致性。
-5. **MINOR / NIT** —— 随日常改动顺带处理。
+5. ~~**MINOR / NIT** 第一组~~（**m1/m3/m4/m5/m6/m8/m10 已修复 2026-10-03，89a82df**）；m2/n1/n2/n3/m7 及 NIT 待办。
 
 ---
 

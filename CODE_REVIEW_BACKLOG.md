@@ -1,7 +1,7 @@
 # LegalMind 代码审查待办清单
 
 **来源**：`CODE_REVIEW_BASELINE.md`（2026-10-03 基线审查）
-**范围**：只列**尚未完成**的项。已关闭的 B1、M1、M2、M4、M5、M6 及合规缺口不在此列。
+**范围**：基线审查发现的项。已关闭的 B1、M1、M2、M4、M5、M6 及合规缺口不在此列；**第一组 7 项已修复（89a82df）**，行保留作处理记录。
 **维护方式**：完成一项就在状态列标注提交号；**不要删行**，保留处理记录。
 **分级口径**：见 `CODE_REVIEW.md` 第 1 节。
 
@@ -9,19 +9,19 @@
 
 ## 一、随手可修（低风险，改动面 ≤ 10 行）
 
-建议合并成 1–2 次提交，随日常改动顺带处理。
+建议合并成 1–2 次提交，随日常改动顺带处理。**已全部修复（89a82df）**，7 项合并为 1 次提交。
 
 | 编号 | 位置 | 影响 | 建议改法 | 改动面 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| m1 | `identity/service.py:102-104` | `verify_password(...) and user.is_active` 依赖短路求值规避 `user` 为 `None`；当前正确，但改动这段逻辑时容易引入 `AttributeError` | 显式写成 `user is not None and verify_password(...) and user.is_active` | 1 行 | 待办 |
-| m5 | `documents/router.py:170` | `job.payload["document_id"]` 缺键会抛 `KeyError` → 500，而不是 404 | 改用 `.get()`，缺失时按 404 处理 | 2 行 | 待办 |
-| m3 | `authorization/grants.py:102-103` | 授权已存在时直接返回、**不写审计**，重复授权动作无痕迹 | 补一条幂等的 `*.access_granted` 审计事件 | ~5 行 | 待办 |
-| m8 | `authorization/grants.py:61-74, 128-134` | `list_grants` / `revoke` 不按 `organization_id` 过滤，依赖调用方先做组织校验（当前调用方均已校验，属纵深防御缺失） | 函数内补注释说明该前置条件，或加 org 条件做纵深防御 | 2–6 行 | 待办 |
-| m4 | `identity/mfa.py:66` | 恢复码为 `secrets.token_hex(5)`，仅 40 bit 熵（有失败限流兜底） | 提到 `token_hex(8)`；已发放的旧码不受影响，下次重置生效 | 1 行 | 待办 |
-| m10 | `migrations/env.py:29-33` | 未启用 `compare_server_default`，`server_default` 漂移不会被 `alembic check` 发现 | 在两处 `context.configure` 中开启 | 2 行 | 待办 |
-| m6 | `frontend/src/App.tsx:179-181` | `canWrite` 硬编码角色名单，与后端 `ROLE_PERMISSIONS` 重复；后端改权限后前端提示会不同步（**仅影响 UX，后端仍强制校验**） | 加注释声明"仅作展示提示，不得作为权限依据"；彻底解决需后端返回能力标志 | 注释 1 行 | 待办 |
+| m1 | `identity/service.py:102-104` | `verify_password(...) and user.is_active` 依赖短路求值规避 `user` 为 `None`；当前正确，但改动这段逻辑时容易引入 `AttributeError` | **勿直接前置判空**（会跳过哈希校验、破坏时间恒定/用户枚举）：先 `password_ok = verify_password(user.password_hash if user else None, password)`，再 `succeeded = password_ok and user is not None and user.is_active` | 1 行 | 已修 89a82df |
+| m5 | `documents/router.py:170` | `job.payload["document_id"]` 缺键会抛 `KeyError` → 500，而不是 404 | 改用 `.get()`，缺失时按 404 处理 | 2 行 | 已修 89a82df |
+| m3 | `authorization/grants.py:102-103` | 授权已存在时直接返回、**不写审计**，重复授权动作无痕迹 | 补一条幂等的 `*.access_granted` 审计事件 | ~5 行 | 已修 89a82df |
+| m8 | `authorization/grants.py:61-74, 128-134` | `list_grants` / `revoke` 不按 `organization_id` 过滤，依赖调用方先做组织校验（当前调用方均已校验，属纵深防御缺失） | 函数内补注释说明该前置条件，或加 org 条件做纵深防御 | 2–6 行 | 已修 89a82df |
+| m4 | `identity/mfa.py:66` | 恢复码为 `secrets.token_hex(5)`，仅 40 bit 熵（有失败限流兜底） | 提到 `token_hex(8)`；已发放的旧码不受影响，下次重置生效 | 1 行 | 已修 89a82df |
+| m10 | `migrations/env.py:29-33` | 未启用 `compare_server_default`，`server_default` 漂移不会被 `alembic check` 发现 | 在两处 `context.configure` 中开启 | 2 行 | 已修 89a82df |
+| m6 | `frontend/src/App.tsx:179-181` | `canWrite` 硬编码角色名单，与后端 `ROLE_PERMISSIONS` 重复；后端改权限后前端提示会不同步（**仅影响 UX，后端仍强制校验**） | 加注释声明"仅作展示提示，不得作为权限依据"；彻底解决需后端返回能力标志 | 注释 1 行 | 已修 89a82df |
 
-**小计**：7 项，合计约 20 行改动。
+**小计**：7 项，合计约 20 行改动。**已全部修复（89a82df）**。
 
 ---
 
@@ -66,7 +66,7 @@
 
 | 分组 | 项数 | 说明 |
 | --- | --- | --- |
-| 一、随手可修 | 7 | 约 20 行，可合并提交 |
+| 一、随手可修 | 0 | 已全部修复（89a82df），原 7 项约 20 行 |
 | 二、需一次决策 | 5 | 含格式基线、前端工具链、外键策略 |
 | 三、P5 功能补齐 | 2 | M3 改动面最大，需与 P5 一起设计 |
 | 四、基础设施 | 3 | 需一次决策后实施 |

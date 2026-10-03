@@ -272,6 +272,8 @@ def test_restore_aborts_on_conflicting_existing_file(tmp_path, valid_backup):
         do_restore(backup_dir, db_url, str(storage_root), dry_run=False, settings=settings)
 
     assert "冲突" in str(exc_info.value) or "不同" in str(exc_info.value)
+    # 冲突必须在覆盖数据库之前被拦下，否则会留下“库已恢复、原件未恢复”的不一致状态（设计 15.2）
+    mock_run.assert_not_called()
 
 
 def test_restore_fails_on_missing_backup_meta(tmp_path, valid_backup):

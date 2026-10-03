@@ -259,6 +259,21 @@ def do_restore(
     if bad:
         sys.exit("原件校验失败，中止恢复:\n" + "\n".join(bad))
 
+    # 目标存储的冲突检查必须在覆盖数据库之前完成，
+    # 否则冲突中止会留下“库已恢复、原件未恢复”的不一致状态（设计 15.2）
+    conflicts: list[str] = []
+    for entry in entries:
+        key = entry["object_key"]
+        existing = storage_root / "objects" / key[:2] / key
+        if existing.exists() and hashlib.sha256(existing.read_bytes()).hexdigest() != entry["sha256"]:
+            conflicts.append(key)
+    if conflicts:
+        preview = "、".join(conflicts[:5])
+        sys.exit(
+            f"恢复冲突（{len(conflicts)} 个），未修改数据库: {preview} 已存在且内容不同，"
+            "请先清空存储目录再恢复。"
+        )
+
     print(f"全部 {len(entries)} 个原件校验通过。")
     if dry_run:
         print("Dry run：未写入任何数据。")
@@ -283,10 +298,9 @@ def do_restore(
         src_file = objects_src / key[:2] / key
         dst_file = storage_root / "objects" / key[:2] / key
         if dst_file.exists():
-            if hashlib.sha256(dst_file.read_bytes()).hexdigest() == entry["sha256"]:
-                skipped += 1
-                continue
-            sys.exit(f"恢复冲突: {key} 已存在且内容不同，请先清空存储目录再恢复。")
+            # 内容冲突已在恢复数据库前排除，此处必定一致
+            skipped += 1
+            continue
         dst_file.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src_file, dst_file)
         copied += 1

@@ -1,15 +1,5 @@
 import { useEffect, useState } from "react";
-import {
-  Alert,
-  Button,
-  Card,
-  Checkbox,
-  Input,
-  List,
-  Space,
-  Tag,
-  Typography,
-} from "antd";
+import { Alert, Button, Card, Checkbox, Input, List, Space, Tag, Typography } from "antd";
 
 type AccessScope = "organization" | "restricted";
 
@@ -64,10 +54,7 @@ export default function App() {
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
 
-  async function api<T>(
-    path: string,
-    init: RequestInit = {},
-  ): Promise<T> {
+  async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     const headers = new Headers(init.headers);
     const method = init.method ?? "GET";
 
@@ -94,11 +81,7 @@ export default function App() {
         clearWorkspace();
       }
 
-      throw new Error(
-        `${response.status}: ${
-          message ? String(message) : response.statusText
-        }`,
-      );
+      throw new Error(`${response.status}: ${message ? String(message) : response.statusText}`);
     }
 
     if (response.status === 204) {
@@ -177,9 +160,8 @@ export default function App() {
   const mfaReady = user?.mfa_status === "ok";
 
   // 仅作界面提示，不得作为权限依据；强制校验在后端 ROLE_PERMISSIONS
-  const canWrite = mfaReady && Boolean(
-    user?.roles.some((role) => ["editor", "knowledge_admin"].includes(role)),
-  );
+  const canWrite =
+    mfaReady && Boolean(user?.roles.some((role) => ["editor", "knowledge_admin"].includes(role)));
 
   async function execute(task: () => Promise<void>) {
     setBusy(true);
@@ -189,9 +171,7 @@ export default function App() {
     try {
       await task();
     } catch (reason) {
-      setError(
-        reason instanceof Error ? reason.message : String(reason),
-      );
+      setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setBusy(false);
     }
@@ -203,9 +183,7 @@ export default function App() {
   }
 
   async function openPage(page: Page) {
-    const result = await api<Revision[]>(
-      `/wiki/pages/${page.id}/revisions?limit=100`,
-    );
+    const result = await api<Revision[]>(`/wiki/pages/${page.id}/revisions?limit=100`);
 
     if (!result.length) {
       throw new Error("该页面没有可读取修订。");
@@ -232,16 +210,13 @@ export default function App() {
 
   async function saveDraft() {
     if (selected) {
-      const revision = await api<Revision>(
-        `/wiki/pages/${selected.id}/revisions`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            expected_revision: selected.head_revision,
-            body,
-          }),
-        },
-      );
+      const revision = await api<Revision>(`/wiki/pages/${selected.id}/revisions`, {
+        method: "POST",
+        body: JSON.stringify({
+          expected_revision: selected.head_revision,
+          body,
+        }),
+      });
 
       setSelected({
         ...selected,
@@ -300,10 +275,7 @@ export default function App() {
             <Typography.Text>
               {user.username}（{user.roles.join("、")}）
             </Typography.Text>
-            <Button
-              disabled={busy || !mfaReady}
-              onClick={() => void execute(loadPages)}
-            >
+            <Button disabled={busy || !mfaReady} onClick={() => void execute(loadPages)}>
               加载页面
             </Button>
             <Button disabled={busy} onClick={() => void execute(logout)}>
@@ -329,11 +301,7 @@ export default function App() {
                 管理员账号须绑定 TOTP 认证器（如 Microsoft Authenticator、Google
                 Authenticator）后才能使用业务功能。
               </Typography.Paragraph>
-              <Button
-                type="primary"
-                loading={busy}
-                onClick={() => void execute(startEnrollment)}
-              >
+              <Button type="primary" loading={busy} onClick={() => void execute(startEnrollment)}>
                 开始绑定
               </Button>
             </Space>
@@ -442,23 +410,9 @@ export default function App() {
         </Card>
       )}
 
-      {error && (
-        <Alert
-          className="section"
-          type="error"
-          showIcon
-          message={error}
-        />
-      )}
+      {error && <Alert className="section" type="error" showIcon message={error} />}
 
-      {notice && (
-        <Alert
-          className="section"
-          type="success"
-          showIcon
-          message={notice}
-        />
-      )}
+      {notice && <Alert className="section" type="success" showIcon message={notice} />}
 
       <div className="columns">
         <Card
@@ -469,9 +423,7 @@ export default function App() {
             </Button>
           }
         >
-          <Typography.Paragraph type="secondary">
-            开发界面最多显示 100 页。
-          </Typography.Paragraph>
+          <Typography.Paragraph type="secondary">开发界面最多显示 100 页。</Typography.Paragraph>
 
           <List
             dataSource={pages}
@@ -491,13 +443,7 @@ export default function App() {
           />
         </Card>
 
-        <Card
-          title={
-            selected
-              ? `编辑草稿 · 修订 ${selected.head_revision}`
-              : "新建 Wiki 草稿"
-          }
-        >
+        <Card title={selected ? `编辑草稿 · 修订 ${selected.head_revision}` : "新建 Wiki 草稿"}>
           <Space direction="vertical" style={{ width: "100%" }}>
             <Input
               placeholder="页面标题"
@@ -519,9 +465,7 @@ export default function App() {
 
             {selected ? (
               selected.access_scope === "restricted" && (
-                <Typography.Text type="secondary">
-                  受限页面：仅获授权的用户可见。
-                </Typography.Text>
+                <Typography.Text type="secondary">受限页面：仅获授权的用户可见。</Typography.Text>
               )
             ) : (
               <Checkbox
@@ -543,8 +487,7 @@ export default function App() {
             </Button>
 
             <Typography.Paragraph type="secondary">
-              遇到 409 冲突时，先自行保留未保存文字，再重新打开页面。
-              当前版本不会自动合并编辑。
+              遇到 409 冲突时，先自行保留未保存文字，再重新打开页面。 当前版本不会自动合并编辑。
             </Typography.Paragraph>
           </Space>
         </Card>

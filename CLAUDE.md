@@ -37,6 +37,9 @@ export DATABASE_URL="postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@
 .venv/Scripts/python.exe -m alembic upgrade head
 .venv/Scripts/python.exe -m app.cli create-user --org 示例机构 --username admin --role system_admin   # 首次；密码交互输入
 .venv/Scripts/python.exe -m app.cli reset-mfa --username admin   # 管理员丢失认证器和恢复码时
+.venv/Scripts/python.exe -m app.cli backup --dest /path/to/backups              # 备份（标签默认为 UTC 时间戳）
+.venv/Scripts/python.exe -m app.cli restore --src /path/to/backups/<label> --dry-run   # 先 dry-run 校验
+.venv/Scripts/python.exe -m app.cli restore --src /path/to/backups/<label>             # 正式恢复
 .venv/Scripts/python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 .venv/Scripts/python.exe -m pytest
 ```

@@ -11,9 +11,15 @@
 import argparse
 import asyncio
 import getpass
+import hashlib
+import json
+import os
+import shutil
+import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -140,6 +146,158 @@ async def import_documents(
         sys.exit(1)
 
 
+def _pg_env_and_args(database_url: str) -> tuple[dict, list[str]]:
+    """将 DATABASE_URL 拆成 pg_dump / pg_restore 的连接参数和环境变量。"""
+    url = database_url.replace("+asyncpg", "")
+    parsed = urlparse(url)
+    env = os.environ.copy()
+    if parsed.password:
+        env["PGPASSWORD"] = parsed.password
+    args: list[str] = []
+    if parsed.hostname:
+        args += ["-h", parsed.hostname]
+    if parsed.port:
+        args += ["-p", str(parsed.port)]
+    if parsed.username:
+        args += ["-U", parsed.username]
+    return env, args
+
+
+def do_backup(dest: Path, label: str | None, settings=None) -> None:
+    if settings is None:
+        from app.core.config import get_settings  # noqa: PLC0415 — 避免在测试中触发 DB 验证
+        settings = get_settings()
+    if label is None:
+        label = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+    backup_dir = dest / label
+    if backup_dir.exists():
+        sys.exit(f"备份目录已存在: {backup_dir}")
+    backup_dir.mkdir(parents=True)
+
+    env, conn_args = _pg_env_and_args(settings.database_url)
+    db_name = urlparse(settings.database_url.replace("+asyncpg", "")).path.lstrip("/")
+    dump_path = backup_dir / "db.dump"
+
+    print(f"导出数据库 → {dump_path} …")
+    result = subprocess.run(
+        ["pg_dump", "--format=custom", "-f", str(dump_path)] + conn_args + [db_name],
+        env=env, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        shutil.rmtree(backup_dir, ignore_errors=True)
+        sys.exit(f"pg_dump 失败:\n{result.stderr}")
+
+    storage_root = Path(settings.storage_root).resolve()
+    objects_src = storage_root / "objects"
+    objects_dst = backup_dir / "objects"
+
+    entries: list[dict] = []
+    if objects_src.exists():
+        for src_file in sorted(objects_src.rglob("*")):
+            if not src_file.is_file():
+                continue
+            content = src_file.read_bytes()
+            sha256 = hashlib.sha256(content).hexdigest()
+            dst = objects_dst / src_file.relative_to(objects_src)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_file, dst)
+            entries.append({"object_key": src_file.name, "sha256": sha256, "size_bytes": len(content)})
+
+    (backup_dir / "artifacts_manifest.json").write_text(
+        json.dumps({"format_version": "1", "entries": entries}, indent=2), encoding="utf-8"
+    )
+    (backup_dir / "backup_meta.json").write_text(
+        json.dumps({
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "label": label,
+            "artifact_count": len(entries),
+            "db_size_bytes": dump_path.stat().st_size,
+        }, indent=2), encoding="utf-8",
+    )
+    print(f"备份完成: {backup_dir}\n  DB dump: {dump_path.stat().st_size:,} 字节  原件: {len(entries)} 个")
+
+
+def do_restore(
+    src: Path,
+    database_url: str | None,
+    storage_root_override: str | None,
+    dry_run: bool,
+    settings=None,
+) -> None:
+    if settings is None:
+        from app.core.config import get_settings  # noqa: PLC0415
+        settings = get_settings()
+    db_url = database_url or settings.database_url
+    storage_root = Path(storage_root_override or settings.storage_root).resolve()
+
+    for name in ("backup_meta.json", "artifacts_manifest.json", "db.dump"):
+        if not (src / name).exists():
+            sys.exit(f"备份不完整，缺失: {name}")
+
+    meta = json.loads((src / "backup_meta.json").read_text(encoding="utf-8"))
+    manifest = json.loads((src / "artifacts_manifest.json").read_text(encoding="utf-8"))
+    if manifest.get("format_version") != "1":
+        sys.exit(f"不支持的清单版本: {manifest.get('format_version')!r}")
+
+    entries: list[dict] = manifest.get("entries", [])
+    print(f"备份时间: {meta.get('created_at')}  原件数: {len(entries)}")
+
+    # 全部校验通过才继续，不做部分恢复
+    print("校验原件哈希 …")
+    bad: list[str] = []
+    objects_src = src / "objects"
+    for entry in entries:
+        key = entry["object_key"]
+        backup_file = objects_src / key[:2] / key
+        if not backup_file.exists():
+            bad.append(f"  {key}: 备份文件缺失")
+            continue
+        actual = hashlib.sha256(backup_file.read_bytes()).hexdigest()
+        if actual != entry["sha256"]:
+            bad.append(f"  {key}: sha256 不符 (期望 {entry['sha256'][:12]}… 实际 {actual[:12]}…)")
+    if bad:
+        sys.exit("原件校验失败，中止恢复:\n" + "\n".join(bad))
+
+    print(f"全部 {len(entries)} 个原件校验通过。")
+    if dry_run:
+        print("Dry run：未写入任何数据。")
+        return
+
+    env, conn_args = _pg_env_and_args(db_url)
+    db_name = urlparse(db_url.replace("+asyncpg", "")).path.lstrip("/")
+    print(f"恢复数据库 {db_name!r} …")
+    result = subprocess.run(
+        ["pg_restore", "--clean", "--if-exists", "-d", db_name] + conn_args + [str(src / "db.dump")],
+        env=env, capture_output=True, text=True,
+    )
+    # pg_restore 仅当 exit > 1 时才是真实错误（exit 1 可能只是警告）
+    if result.returncode > 1:
+        sys.exit(f"pg_restore 失败 (exit {result.returncode}):\n{result.stderr}")
+    if result.stderr:
+        print(f"pg_restore 警告:\n{result.stderr.strip()}")
+
+    copied = skipped = 0
+    for entry in entries:
+        key = entry["object_key"]
+        src_file = objects_src / key[:2] / key
+        dst_file = storage_root / "objects" / key[:2] / key
+        if dst_file.exists():
+            if hashlib.sha256(dst_file.read_bytes()).hexdigest() == entry["sha256"]:
+                skipped += 1
+                continue
+            sys.exit(f"恢复冲突: {key} 已存在且内容不同，请先清空存储目录再恢复。")
+        dst_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_file, dst_file)
+        copied += 1
+
+    print(
+        f"恢复完成。\n"
+        f"  原件写入: {copied} 个，已存在跳过: {skipped} 个\n"
+        f"  建议验证: SELECT acquired_at FROM source_artifacts LIMIT 5;"
+    )
+
+
 async def reset_mfa(username: str) -> None:
     async with SessionFactory() as session:
         try:
@@ -163,6 +321,16 @@ def main() -> None:
     # 认证器与恢复码都丢失时由运维在服务器上执行，操作写入审计
     reset = commands.add_parser("reset-mfa")
     reset.add_argument("--username", required=True)
+
+    bak = commands.add_parser("backup", help="备份数据库和原始文件到本地目录")
+    bak.add_argument("--dest", required=True, type=Path, help="备份存放的父目录")
+    bak.add_argument("--label", default=None, help="本次备份的标签（默认为 UTC 时间戳）")
+
+    res = commands.add_parser("restore", help="从备份目录恢复数据库和原始文件")
+    res.add_argument("--src", required=True, type=Path, help="备份目录（含 backup_meta.json）")
+    res.add_argument("--db-url", default=None, help="覆盖 DATABASE_URL")
+    res.add_argument("--storage-root", default=None, help="覆盖 STORAGE_ROOT")
+    res.add_argument("--dry-run", action="store_true", help="仅校验，不写入任何数据")
 
     # 以 --as 指定的用户身份执行，需要该用户角色具备相应权限，操作写入审计
     source = commands.add_parser("create-source")
@@ -191,6 +359,16 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+
+    if args.command == "backup":
+        do_backup(args.dest, args.label)
+        return
+
+    if args.command == "restore":
+        if not args.src.is_dir():
+            sys.exit(f"备份目录不存在: {args.src}")
+        do_restore(args.src, args.db_url, args.storage_root, args.dry_run)
+        return
 
     if args.command == "reset-mfa":
         asyncio.run(reset_mfa(args.username))

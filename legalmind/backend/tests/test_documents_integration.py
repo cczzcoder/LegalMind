@@ -122,9 +122,7 @@ async def test_duplicate_and_invalid_files_rejected_without_leftovers(
         executable = await import_file(client, source_id, b"MZ\x90\x00", filename="a.exe")
         mismatch = await import_file(client, source_id, b"%PDF-1.7", filename="a.docx")
         empty = await import_file(client, source_id, b"")
-        unknown_source = await import_file(
-            client, "00000000-0000-0000-0000-000000000000", b"other"
-        )
+        unknown_source = await import_file(client, "00000000-0000-0000-0000-000000000000", b"other")
 
     assert first.status_code == 202
     assert duplicate.status_code == 409
@@ -203,9 +201,7 @@ async def test_restricted_document_hidden_until_granted(make_client, make_user, 
             )
 
         before = await reader_sees()
-        missing = await reader_client.get(
-            "/api/v1/documents/00000000-0000-0000-0000-000000000000"
-        )
+        missing = await reader_client.get("/api/v1/documents/00000000-0000-0000-0000-000000000000")
         grant_url = f"/api/v1/documents/{document_id}/grants/{reader.id}"
         granted = await admin_client.put(grant_url)
         during = await reader_sees()

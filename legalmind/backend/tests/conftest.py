@@ -6,9 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 os.environ["APP_ENV"] = "test"
-os.environ["DATABASE_URL"] = (
-    "postgresql+asyncpg://unused:unused@localhost/unused"
-)
+os.environ["DATABASE_URL"] = "postgresql+asyncpg://unused:unused@localhost/unused"
 os.environ["TRUSTED_PROXIES"] = ""
 
 from cryptography.fernet import Fernet

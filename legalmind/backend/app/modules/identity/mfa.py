@@ -136,9 +136,7 @@ async def confirm_enrollment(
             user.mfa_enabled_at = utcnow()
             user.mfa_last_timecode = timecode
             codes = new_recovery_codes()
-            await session.execute(
-                delete(MfaRecoveryCode).where(MfaRecoveryCode.user_id == user.id)
-            )
+            await session.execute(delete(MfaRecoveryCode).where(MfaRecoveryCode.user_id == user.id))
             session.add_all(
                 MfaRecoveryCode(user_id=user.id, code_hash=hash_token(normalize_recovery_code(c)))
                 for c in codes
@@ -198,9 +196,7 @@ async def verify(session: AsyncSession, principal: Principal, code: str) -> None
 async def reset(session: AsyncSession, username: str) -> User:
     """清除第二因素并吊销全部会话；仅供 CLI 在设备与恢复码都丢失时使用。"""
     async with session.begin():
-        user = await session.scalar(
-            select(User).where(User.username == username).with_for_update()
-        )
+        user = await session.scalar(select(User).where(User.username == username).with_for_update())
         if user is None:
             raise LookupError(username)
 

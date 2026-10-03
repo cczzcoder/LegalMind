@@ -143,23 +143,28 @@ def _make_valid_backup(backup_dir: Path, files: dict[str, bytes]) -> None:
         dest = objects_dir / key[:2] / key
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(content)
-        entries.append({
-            "object_key": key,
-            "sha256": hashlib.sha256(content).hexdigest(),
-            "size_bytes": len(content),
-        })
+        entries.append(
+            {
+                "object_key": key,
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "size_bytes": len(content),
+            }
+        )
 
     (backup_dir / "db.dump").write_bytes(b"fake dump data")
     (backup_dir / "artifacts_manifest.json").write_text(
         json.dumps({"format_version": "1", "entries": entries}), encoding="utf-8"
     )
     (backup_dir / "backup_meta.json").write_text(
-        json.dumps({
-            "created_at": "2026-10-03T00:00:00+00:00",
-            "label": "test",
-            "artifact_count": len(entries),
-            "db_size_bytes": 14,
-        }), encoding="utf-8",
+        json.dumps(
+            {
+                "created_at": "2026-10-03T00:00:00+00:00",
+                "label": "test",
+                "artifact_count": len(entries),
+                "db_size_bytes": 14,
+            }
+        ),
+        encoding="utf-8",
     )
 
 

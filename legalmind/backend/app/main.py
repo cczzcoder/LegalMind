@@ -55,9 +55,7 @@ async def live():
 async def ready():
     try:
         async with engine.connect() as connection:
-            await connection.execute(
-                text("SELECT id FROM wiki_pages LIMIT 0")
-            )
+            await connection.execute(text("SELECT id FROM wiki_pages LIMIT 0"))
     except SQLAlchemyError:
         raise HTTPException(
             status_code=503,

@@ -43,8 +43,7 @@ class AuthorizationService:
     def can(principal: Principal, permission: str) -> bool:
         # 未知角色不授予任何权限
         return any(
-            permission in ROLE_PERMISSIONS.get(role, frozenset())
-            for role in principal.roles
+            permission in ROLE_PERMISSIONS.get(role, frozenset()) for role in principal.roles
         )
 
     @staticmethod

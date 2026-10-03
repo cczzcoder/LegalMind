@@ -147,9 +147,7 @@ async def test_inactive_user_session_rejected_even_if_not_revoked(
     async with make_client() as client:
         await login(client, user.username)
         async with session_factory() as session, session.begin():
-            await session.execute(
-                update(User).where(User.id == user.id).values(is_active=False)
-            )
+            await session.execute(update(User).where(User.id == user.id).values(is_active=False))
         after = await client.get("/api/v1/wiki/pages")
 
     assert after.status_code == 401
@@ -250,9 +248,7 @@ async def test_idle_session_expires(make_client, make_user, session_factory):
     assert expired.status_code == 401
 
 
-async def test_auth_events_are_audited_without_secrets(
-    make_client, make_user, session_factory
-):
+async def test_auth_events_are_audited_without_secrets(make_client, make_user, session_factory):
     user = await make_user("editor")
 
     async with make_client() as client:

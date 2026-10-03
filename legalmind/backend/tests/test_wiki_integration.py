@@ -28,9 +28,7 @@ def new_principal() -> Principal:
 async def count(session_factory, model, organization_id: UUID) -> int:
     async with session_factory() as session:
         return await session.scalar(
-            select(func.count())
-            .select_from(model)
-            .where(model.organization_id == organization_id)
+            select(func.count()).select_from(model).where(model.organization_id == organization_id)
         )
 
 
@@ -128,9 +126,7 @@ async def test_concurrent_edits_on_same_revision_only_one_wins(session_factory):
 
     # 先持有页面行锁，让两个编辑都卡在 FOR UPDATE 上，再同时放行
     async with session_factory() as holder, holder.begin():
-        await holder.execute(
-            select(WikiPage).where(WikiPage.id == page_id).with_for_update()
-        )
+        await holder.execute(select(WikiPage).where(WikiPage.id == page_id).with_for_update())
         tasks = [
             asyncio.create_task(edit("编辑 A")),
             asyncio.create_task(edit("编辑 B")),
@@ -141,9 +137,7 @@ async def test_concurrent_edits_on_same_revision_only_one_wins(session_factory):
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     succeeded = [r for r in results if isinstance(r, WikiRevision)]
-    conflicts = [
-        r for r in results if isinstance(r, HTTPException) and r.status_code == 409
-    ]
+    conflicts = [r for r in results if isinstance(r, HTTPException) and r.status_code == 409]
     assert len(succeeded) == 1
     assert len(conflicts) == 1
     assert succeeded[0].number == 2

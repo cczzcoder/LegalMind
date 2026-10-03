@@ -46,9 +46,7 @@ async def list_pages(
     if before is not None:
         statement = statement.where(WikiPage.id < before)
 
-    result = await session.scalars(
-        statement.order_by(WikiPage.id.desc()).limit(limit)
-    )
+    result = await session.scalars(statement.order_by(WikiPage.id.desc()).limit(limit))
     return list(result)
 
 
@@ -93,16 +91,12 @@ async def list_revisions(
 ):
     page = await service.get_visible_page(session, principal, page_id)
 
-    statement = select(WikiRevision).where(
-        WikiRevision.page_id == page.id
-    )
+    statement = select(WikiRevision).where(WikiRevision.page_id == page.id)
 
     if before is not None:
         statement = statement.where(WikiRevision.number < before)
 
-    result = await session.scalars(
-        statement.order_by(WikiRevision.number.desc()).limit(limit)
-    )
+    result = await session.scalars(statement.order_by(WikiRevision.number.desc()).limit(limit))
     return list(result)
 
 

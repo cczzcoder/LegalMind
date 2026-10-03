@@ -77,7 +77,9 @@ def test_rejects_docx_with_macros():
     with pytest.raises(RejectedFile, match="macros"):
         detect_media_type(
             "a.docx",
-            make_docx(content_types=CONTENT_TYPES.replace(b"document.main", b"document.macroEnabled.main")),
+            make_docx(
+                content_types=CONTENT_TYPES.replace(b"document.main", b"document.macroEnabled.main")
+            ),
         )
 
 

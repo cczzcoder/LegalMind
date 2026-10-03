@@ -58,7 +58,10 @@ def _check_docx(content: bytes) -> None:
             if entry.flag_bits & 0x1:
                 raise RejectedFile("Encrypted DOCX entries are not accepted")
             total += entry.file_size
-            if entry.compress_size and entry.file_size / entry.compress_size > MAX_COMPRESSION_RATIO:
+            if (
+                entry.compress_size
+                and entry.file_size / entry.compress_size > MAX_COMPRESSION_RATIO
+            ):
                 raise RejectedFile("DOCX entry compression ratio is too high")
         if total > MAX_UNCOMPRESSED_BYTES:
             raise RejectedFile("DOCX package is too large when uncompressed")

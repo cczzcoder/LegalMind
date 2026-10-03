@@ -4,6 +4,8 @@
 角色映射被误改时这里会失败。
 """
 
+from uuid import uuid4
+
 import pytest
 
 from app.adapters.storage import LocalFileStorage, get_storage
@@ -44,7 +46,8 @@ async def create_source(client, name: str):
     return await client.post(
         "/api/v1/sources",
         json={
-            "name": name,
+            # 来源属公共法律数据，名称全库唯一（设计 21.2）；测试用唯一名避免互相冲突
+            "name": f"{name}-{uuid4().hex[:8]}",
             "source_type": "official",
             "trust_level": "high",
             "license_note": "测试",
@@ -53,10 +56,11 @@ async def create_source(client, name: str):
 
 
 async def import_document(client, source_id: str, content: bytes):
+    # 原件按 sha256 全库唯一（设计 21.2），测试内容加唯一后缀避免互相冲突
     return await client.post(
         "/api/v1/documents",
         params={"source_id": source_id, "filename": "a.txt", "sensitivity": "public"},
-        content=content,
+        content=content + uuid4().hex.encode(),
     )
 
 

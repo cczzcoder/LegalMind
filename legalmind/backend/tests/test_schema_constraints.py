@@ -35,11 +35,8 @@ EXPECTED_FOREIGN_KEYS = (
     ("outbox_events", "organization_id", "organizations"),
     ("access_grants", "organization_id", "organizations"),
     ("access_grants", "granted_by", "users"),
-    ("sources", "organization_id", "organizations"),
     ("sources", "created_by", "users"),
-    ("source_artifacts", "organization_id", "organizations"),
     ("source_artifacts", "created_by", "users"),
-    ("jobs", "organization_id", "organizations"),
     ("parse_revisions", "artifact_id", "source_artifacts"),
     ("parse_revisions", "created_by", "users"),
     ("chunks", "parse_revision_id", "parse_revisions"),
@@ -83,7 +80,6 @@ async def _seed_parse_chain(session) -> Chunk:
     await session.flush()
 
     source = Source(
-        organization_id=organization.id,
         name=f"src-{uuid4().hex[:8]}",
         source_type="official",
         trust_level="high",
@@ -94,7 +90,6 @@ async def _seed_parse_chain(session) -> Chunk:
     await session.flush()
 
     artifact = SourceArtifact(
-        organization_id=organization.id,
         source_id=source.id,
         object_key=uuid4().hex + uuid4().hex,
         sha256=_sha256(),

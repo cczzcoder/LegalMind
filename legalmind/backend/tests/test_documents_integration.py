@@ -1,6 +1,7 @@
 """来源登记与原始资料导入集成测试（FR-01、FR-02、FR-10、FR-11、设计 7.3）：需要 TEST_DATABASE_URL。"""
 
-from uuid import UUID
+import hashlib
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import func, select
@@ -13,6 +14,11 @@ from tests.helpers import login
 pytestmark = pytest.mark.anyio
 
 LAW_TEXT = "中华人民共和国劳动法\n第一条　为了保护劳动者的合法权益……".encode()
+
+
+def law_text() -> bytes:
+    """原件按 sha256 全库唯一（设计 21.2），测试每次用唯一内容避免互相冲突。"""
+    return LAW_TEXT + uuid4().hex.encode()
 
 
 @pytest.fixture
@@ -33,7 +39,8 @@ async def create_source(client, **extra):
     return await client.post(
         "/api/v1/sources",
         json={
-            "name": "国家法律法规数据库",
+            # 来源属公共法律数据，名称全库唯一（设计 21.2）；测试用唯一名避免互相冲突
+            "name": f"国家法律法规数据库-{uuid4().hex[:8]}",
             "source_type": "official",
             "trust_level": "high",
             "url": "https://flk.npc.gov.cn",
@@ -43,7 +50,9 @@ async def create_source(client, **extra):
     )
 
 
-async def import_file(client, source_id, content=LAW_TEXT, filename="劳动法.txt", **params):
+async def import_file(client, source_id, content=None, filename="劳动法.txt", **params):
+    if content is None:
+        content = law_text()
     return await client.post(
         "/api/v1/documents",
         params={"source_id": source_id, "filename": filename, "sensitivity": "public", **params},
@@ -70,7 +79,8 @@ async def test_import_registers_document_job_and_audit(
 
     async with make_client() as client:
         await login(client, editor.username)
-        imported = await import_file(client, source_id)
+        content = law_text()
+        imported = await import_file(client, source_id, content)
         assert imported.status_code == 202
         body = imported.json()
         document_id = body["document"]["id"]
@@ -81,7 +91,7 @@ async def test_import_registers_document_job_and_audit(
     document = body["document"]
     assert document["original_filename"] == "劳动法.txt"
     assert document["media_type"] == "text/plain"
-    assert document["size_bytes"] == len(LAW_TEXT)
+    assert document["size_bytes"] == len(content)
     assert document["acquired_at"] is None
     # 解析 worker 尚未实现，任务只登记为 pending
     assert job.status_code == 200
@@ -90,7 +100,7 @@ async def test_import_registers_document_job_and_audit(
     assert [item["id"] for item in listed.json()] == [document_id]
 
     assert download.status_code == 200
-    assert download.content == LAW_TEXT
+    assert download.content == content
     assert download.headers["content-disposition"].startswith("attachment;")
     assert download.headers["x-content-type-options"] == "nosniff"
     assert len(stored_objects(storage)) == 1
@@ -117,8 +127,10 @@ async def test_duplicate_and_invalid_files_rejected_without_leftovers(
 
     async with make_client() as client:
         await login(client, editor.username)
-        first = await import_file(client, source_id)
-        duplicate = await import_file(client, source_id, filename="另一个名字.txt")
+        content = law_text()
+        first = await import_file(client, source_id, content)
+        # 同一内容重复导入被拒：原件按 sha256 全库唯一（设计 21.2）
+        duplicate = await import_file(client, source_id, content, filename="另一个名字.txt")
         executable = await import_file(client, source_id, b"MZ\x90\x00", filename="a.exe")
         mismatch = await import_file(client, source_id, b"%PDF-1.7", filename="a.docx")
         empty = await import_file(client, source_id, b"")
@@ -134,7 +146,7 @@ async def test_duplicate_and_invalid_files_rejected_without_leftovers(
         count = await session.scalar(
             select(func.count())
             .select_from(SourceArtifact)
-            .where(SourceArtifact.organization_id == editor.organization_id)
+            .where(SourceArtifact.sha256 == hashlib.sha256(content).hexdigest())
         )
     assert count == 1
 
@@ -222,7 +234,8 @@ async def test_restricted_document_hidden_until_granted(make_client, make_user, 
     assert revoke_again.status_code == 404
 
 
-async def test_other_organization_cannot_see_or_use(make_client, make_user, storage):
+async def test_public_document_is_readable_across_organizations(make_client, make_user, storage):
+    """原件属公共法律数据、全局共享（设计 21.2）：跨组织可读，来源全局可见。"""
     _, editor, source_id = await setup_org(make_client, make_user)
     outsider_admin, outsider_editor, _ = await setup_org(make_client, make_user)
 
@@ -231,24 +244,42 @@ async def test_other_organization_cannot_see_or_use(make_client, make_user, stor
         imported = (await import_file(client, source_id)).json()
     document_id = imported["document"]["id"]
 
-    async with make_client() as editor_client, make_client() as admin_client:
-        await login(editor_client, outsider_editor.username)
+    async with make_client() as outsider_client, make_client() as admin_client:
+        await login(outsider_client, outsider_editor.username)
         responses = (
-            await editor_client.get(f"/api/v1/documents/{document_id}"),
-            await editor_client.get(f"/api/v1/documents/{document_id}/content"),
-            await editor_client.get(f"/api/v1/jobs/{imported['job_id']}"),
-            # 不能把文件挂到别的组织的来源下
-            await import_file(editor_client, source_id, b"cross-org"),
+            await outsider_client.get(f"/api/v1/documents/{document_id}"),
+            await outsider_client.get(f"/api/v1/documents/{document_id}/content"),
+            await outsider_client.get(f"/api/v1/jobs/{imported['job_id']}"),
         )
-        sources = await editor_client.get("/api/v1/sources")
+        sources = await outsider_client.get("/api/v1/sources")
         await login(admin_client, outsider_admin.username)
+        # knowledge_admin 可管理公共原件的授权；管理授权不等于可阅读内容
         grant = await admin_client.put(
             f"/api/v1/documents/{document_id}/grants/{outsider_editor.id}"
         )
 
-    assert [r.status_code for r in responses] == [404, 404, 404, 404]
-    assert grant.status_code == 404
-    assert source_id not in {item["id"] for item in sources.json()}
+    assert [r.status_code for r in responses] == [200, 200, 200]
+    assert source_id in {item["id"] for item in sources.json()}
+    assert grant.status_code == 200
+
+
+async def test_restricted_document_still_requires_a_grant(make_client, make_user, storage):
+    """restricted 原件仍需显式授权（设计 21.2）：全局共享不放开受限资料。"""
+    _, editor, source_id = await setup_org(make_client, make_user)
+    _, outsider_editor, _ = await setup_org(make_client, make_user)
+
+    async with make_client() as client:
+        await login(client, editor.username)
+        imported = (await import_file(client, source_id, access_scope="restricted")).json()
+    document_id = imported["document"]["id"]
+
+    async with make_client() as outsider_client:
+        await login(outsider_client, outsider_editor.username)
+        read = await outsider_client.get(f"/api/v1/documents/{document_id}")
+        content = await outsider_client.get(f"/api/v1/documents/{document_id}/content")
+
+    assert read.status_code == 404
+    assert content.status_code == 404
 
 
 async def test_download_refuses_tampered_or_missing_file(
@@ -286,11 +317,13 @@ async def test_download_refuses_tampered_or_missing_file(
 
 async def test_source_validation_and_duplicates(make_client, make_user):
     admin = await make_user("knowledge_admin")
+    name = f"来源-{uuid4().hex[:8]}"
 
     async with make_client() as client:
         await login(client, admin.username)
-        created = await create_source(client)
-        duplicate = await create_source(client)
+        created = await create_source(client, name=name)
+        # 来源名全库唯一（设计 21.2）：同名重复登记被拒
+        duplicate = await create_source(client, name=name)
         no_license = await create_source(client, name="甲", license_note="  ")
         bad_url = await create_source(client, name="乙", url="javascript:alert(1)")
         naive_time = await create_source(client, name="丙", last_checked_at="2026-01-01T00:00:00")
@@ -306,7 +339,6 @@ async def test_job_lookup_limited_to_parse_jobs(make_client, make_user, session_
     editor = await make_user("editor")
     async with session_factory() as session, session.begin():
         job = Job(
-            organization_id=editor.organization_id,
             job_type="other.task",
             payload={},
             idempotency_key=f"other-{editor.id}",

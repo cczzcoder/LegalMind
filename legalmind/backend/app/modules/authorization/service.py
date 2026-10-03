@@ -66,7 +66,11 @@ class AuthorizationService:
 
     @staticmethod
     def document_scope(principal: Principal) -> ColumnElement[bool]:
-        """当前用户可访问的原始资料范围，规则与 wiki_page_scope 相同。"""
+        """当前用户可访问的原始资料范围。
+
+        原件属公共法律数据，全局共享（设计 21.2），不再按组织过滤：所有已登录用户
+        均可读取组织范围的原件；restricted 原件仍需显式授权。
+        """
         granted = exists(
             select(AccessGrant.id).where(
                 AccessGrant.resource_type == "document",
@@ -74,7 +78,7 @@ class AuthorizationService:
                 AccessGrant.user_id == principal.user_id,
             )
         )
-        return (SourceArtifact.organization_id == principal.organization_id) & or_(
+        return or_(
             SourceArtifact.access_scope == "organization",
             granted,
         )

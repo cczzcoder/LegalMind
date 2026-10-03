@@ -21,7 +21,7 @@ from app.modules.authorization import grants
 from app.modules.authorization.grants import record_event
 from app.modules.authorization.service import AuthorizationService
 from app.modules.documents.validation import RejectedFile, clean_filename, detect_media_type
-from app.modules.sources.service import get_org_source
+from app.modules.sources.service import get_source
 
 PARSE_JOB = "document.parse"
 # 解析处理配置版本；解析器选定后随配置变化递增（设计 7.1）
@@ -52,13 +52,10 @@ async def import_document(
     sha256 = hashlib.sha256(content).hexdigest()
 
     async with session.begin():
-        await get_org_source(session, principal, source_id)
+        await get_source(session, source_id)
         # 提前检查只为避免无谓写盘；并发重复由唯一约束兜底
         duplicate = await session.scalar(
-            select(SourceArtifact.id).where(
-                SourceArtifact.organization_id == principal.organization_id,
-                SourceArtifact.sha256 == sha256,
-            )
+            select(SourceArtifact.id).where(SourceArtifact.sha256 == sha256)
         )
     if duplicate is not None:
         raise HTTPException(status_code=409, detail="Document already imported")
@@ -69,7 +66,6 @@ async def import_document(
     try:
         async with session.begin():
             artifact = SourceArtifact(
-                organization_id=principal.organization_id,
                 source_id=source_id,
                 object_key=key,
                 sha256=sha256,
@@ -89,12 +85,10 @@ async def import_document(
 
             # 只登记任务；解析 worker 尚未实现（P3），任务保持 pending
             job = Job(
-                organization_id=principal.organization_id,
                 job_type=PARSE_JOB,
                 payload={"document_id": str(artifact.id)},
-                idempotency_key=(
-                    f"{principal.organization_id}:{sha256}:{PARSE_JOB}:{PARSE_CONFIG_VERSION}"
-                ),
+                # 公共数据全局共享（设计 21.2）：幂等键不含组织
+                idempotency_key=f"{sha256}:{PARSE_JOB}:{PARSE_CONFIG_VERSION}",
                 status="pending",
                 attempt_count=0,
                 max_attempts=3,
@@ -146,19 +140,14 @@ async def get_visible_document(
     return artifact
 
 
-async def get_org_document(
+async def get_document_for_management(
     session: AsyncSession,
-    principal: Principal,
     document_id: UUID,
 ) -> SourceArtifact:
-    """授权管理用：只按组织查找，管理授权不等于可阅读内容。"""
+    """授权管理用：按 ID 查找。原件属公共数据，不再按组织过滤（设计 21.2）；
+    管理授权不等于可阅读内容。"""
     artifact = await session.scalar(
-        select(SourceArtifact)
-        .where(
-            SourceArtifact.id == document_id,
-            SourceArtifact.organization_id == principal.organization_id,
-        )
-        .with_for_update()
+        select(SourceArtifact).where(SourceArtifact.id == document_id).with_for_update()
     )
     if artifact is None:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -205,7 +194,7 @@ async def set_access_scope(
     access_scope: str,
 ) -> SourceArtifact:
     async with session.begin():
-        artifact = await get_org_document(session, principal, document_id)
+        artifact = await get_document_for_management(session, document_id)
         if artifact.sensitivity == "confidential" and access_scope != "restricted":
             raise HTTPException(
                 status_code=422,
@@ -231,7 +220,7 @@ async def list_grants(
     document_id: UUID,
 ) -> list[AccessGrant]:
     async with session.begin():
-        artifact = await get_org_document(session, principal, document_id)
+        artifact = await get_document_for_management(session, document_id)
         return await grants.list_grants(session, "document", artifact.id)
 
 
@@ -242,7 +231,7 @@ async def grant(
     user_id: UUID,
 ) -> AccessGrant:
     async with session.begin():
-        artifact = await get_org_document(session, principal, document_id)
+        artifact = await get_document_for_management(session, document_id)
         return await grants.grant(
             session,
             principal,
@@ -261,7 +250,7 @@ async def revoke(
     user_id: UUID,
 ) -> None:
     async with session.begin():
-        artifact = await get_org_document(session, principal, document_id)
+        artifact = await get_document_for_management(session, document_id)
         await grants.revoke(
             session,
             principal,

@@ -21,11 +21,8 @@ async def list_sources(
     session: SessionDep,
     principal: Annotated[Principal, Depends(require_permission(DOCUMENT_READ))],
 ):
-    result = await session.scalars(
-        select(Source)
-        .where(Source.organization_id == principal.organization_id)
-        .order_by(Source.name)
-    )
+    # 来源属公共法律数据，全局共享（设计 21.2）
+    result = await session.scalars(select(Source).order_by(Source.name))
     return list(result)
 
 

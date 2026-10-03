@@ -334,7 +334,8 @@ class Source(Base):
 
     __tablename__ = "sources"
     __table_args__ = (
-        UniqueConstraint("organization_id", "name", name="uq_source_name"),
+        # 公共数据全局共享（设计 21.2）：来源名全库唯一
+        UniqueConstraint("name", name="uq_source_name"),
         CheckConstraint(_in("source_type", SOURCE_TYPES), name="ck_source_type"),
         CheckConstraint(_in("trust_level", TRUST_LEVELS), name="ck_source_trust_level"),
     )
@@ -342,10 +343,6 @@ class Source(Base):
     id: Mapped[UUID] = mapped_column(
         primary_key=True,
         default=uuid4,
-    )
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organizations.id", ondelete="RESTRICT"),
-        index=True,
     )
     name: Mapped[str] = mapped_column(String(200))
     source_type: Mapped[str] = mapped_column(String(20))
@@ -371,7 +368,8 @@ class SourceArtifact(Base):
 
     __tablename__ = "source_artifacts"
     __table_args__ = (
-        UniqueConstraint("organization_id", "sha256", name="uq_source_artifact_sha256"),
+        # 公共数据全局共享（设计 21.2）：同一原件全库只登记一次
+        UniqueConstraint("sha256", name="uq_source_artifact_sha256"),
         CheckConstraint(_in("sensitivity", SENSITIVITY_LEVELS), name="ck_artifact_sensitivity"),
         CheckConstraint(
             "access_scope IN ('organization', 'restricted')",
@@ -387,10 +385,6 @@ class SourceArtifact(Base):
     id: Mapped[UUID] = mapped_column(
         primary_key=True,
         default=uuid4,
-    )
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organizations.id", ondelete="RESTRICT"),
-        index=True,
     )
     source_id: Mapped[UUID] = mapped_column(
         ForeignKey("sources.id", ondelete="RESTRICT"),
@@ -444,7 +438,8 @@ class Job(Base):
 
     __tablename__ = "jobs"
     __table_args__ = (
-        UniqueConstraint("organization_id", "idempotency_key", name="uq_job_idempotency"),
+        # 公共数据全局共享（设计 21.2）：幂等键不再含组织
+        UniqueConstraint("idempotency_key", name="uq_job_idempotency"),
         CheckConstraint(_in("status", JOB_STATUSES), name="ck_job_status"),
         CheckConstraint("attempt_count >= 0", name="ck_job_attempts_nonnegative"),
     )
@@ -452,10 +447,6 @@ class Job(Base):
     id: Mapped[UUID] = mapped_column(
         primary_key=True,
         default=uuid4,
-    )
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organizations.id", ondelete="RESTRICT"),
-        index=True,
     )
     job_type: Mapped[str] = mapped_column(String(50))
     payload: Mapped[dict] = mapped_column(JSONB)

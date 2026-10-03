@@ -160,9 +160,7 @@ async def revoke(document_id: UUID, user_id: UUID, session: SessionDep, principa
 
 @router.get("/jobs/{job_id}", response_model=JobOut)
 async def get_job(job_id: UUID, session: SessionDep, principal: ReaderDep):
-    job = await session.scalar(
-        select(Job).where(Job.id == job_id, Job.organization_id == principal.organization_id)
-    )
+    job = await session.scalar(select(Job).where(Job.id == job_id))
     # 任务可见性跟随其资料：看不到资料就看不到任务，避免借任务探测受限资料
     if job is None or job.job_type != service.PARSE_JOB:
         raise HTTPException(status_code=404, detail="Job not found")

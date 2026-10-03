@@ -6,10 +6,12 @@
 
 v0.1.0：本地开发基础版，不可直接用于生产。
 
+当前实现覆盖设计实施阶段 P0–P2：需求阶段 A 已完成；阶段 B 只完成 P2（认证授权、文件存储、备份恢复），P3（原文解析与法律版本）、P4（检索）、P5（Wiki 审核发布）尚未开始；阶段 C 未开始。进度口径见《系统设计文档》17.2。
+
 ## 已实现
 
 - FastAPI + PostgreSQL + SQLAlchemy
-- Alembic 迁移（0001 Wiki/审计/Outbox，0002 身份与会话，0003 MFA 与页面授权）
+- Alembic 迁移（0001 Wiki/审计/Outbox，0002 身份与会话，0003 MFA 与页面授权，0004 来源/原件/任务，0005 审计索引，0006 业务表外键）
 - React 登录页、MFA 绑定/验证与 Wiki 草稿界面
 - Wiki 修订历史与并发冲突检测
 - 用户名密码登录（Argon2id）、PostgreSQL 服务端会话、CSRF 防护
@@ -21,14 +23,20 @@ v0.1.0：本地开发基础版，不可直接用于生产。
   knowledge_admin 管理授权名单，但管理授权不等于可阅读内容
 - 可信代理：仅信任 TRUSTED_PROXIES 中的代理传来的 X-Forwarded-For
 - 同事务审计及 Outbox 写入；登录、退出、MFA、用户与角色、页面授权变更写审计
+- 来源登记（FR-01）：来源类型、可信等级、授权说明、最后核查时间
+- 原始文件导入与下载（FR-02）：流式上传限流、压缩炸弹/宏/PDF 主动内容检查、原子写盘加哈希校验；文档级授权与页面级授权共用 AccessGrant
+- 备份与恢复：`app.cli backup` / `restore`，含原件清单与 SHA-256 校验、恢复前冲突检查与 dry-run
+- 业务表统一外键（设计 5.3）：organization_id 与"人"引用列（created_by / author_id / granted_by / actor_id），ondelete 一律 RESTRICT
+- 前端静态检查：eslint + prettier（`npm run lint` / `npm run format:check`）
+- CI（GitHub Actions）：push 与 PR 自动跑后端 lint / 迁移漂移检查 / 测试，以及前端 lint / 构建
 
 ## 未实现
 
-- 页面授权名单的前端管理界面（目前通过 API）
+- 来源登记、文件导入下载与授权名单的前端管理界面（目前均通过 API）
 - Wiki 审核及发布
 - 法律版本业务
 - 文档解析、检索、AI 问答
-- Outbox 消费、审计防篡改、备份恢复
+- Outbox 消费、审计防篡改
 
 ## 启动
 
@@ -70,6 +78,21 @@ API 文档：
 容器内未设置 TEST_DATABASE_URL，只运行冒烟测试，集成测试会跳过。
 集成测试的本机运行方式见仓库根目录 CLAUDE.md。
 测试通过不代表完整业务和安全测试已经通过。
+CI（`.github/workflows/ci.yml`）在 push 与 PR 上跑同一套门禁。
+
+## 备份与恢复
+
+备份与恢复依赖宿主机的 `pg_dump` / `pg_restore`，且版本需与数据库服务器一致：
+
+    python -m app.cli backup --dest /path/to/backups
+    python -m app.cli restore --src /path/to/backups/<label> --dry-run   # 先校验，不写入
+    python -m app.cli restore --src /path/to/backups/<label>
+
+数据库跑在 Docker、宿主机没有这两个命令时，`backup` 会直接报错并给出提示。此时若只需备份数据库：
+
+    docker compose exec -T postgres pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom > db.dump
+
+注意这只含数据库，**不含原始文件**（原始文件在 `artifacts_data` 卷内，需一并备份）。
 
 ## 停止
 
@@ -91,7 +114,7 @@ API 文档：
 - 数据库迁移与应用暂共用开发账号。
 - 当前 Compose 不构成生产安全基线。
 - 前端使用开发服务器，正式部署必须替换。
-- 接入真实资料之前，先实现权限、来源管理及备份。
+- 接入真实资料前须先确认来源授权说明与数据分级（需求 2.2）。
 - 不应将包含敏感内容的 .env、数据库或原始文件提交仓库。
 
 ## 依赖

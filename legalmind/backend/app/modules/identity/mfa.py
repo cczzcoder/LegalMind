@@ -63,8 +63,9 @@ def normalize_recovery_code(code: str) -> str:
 
 
 def new_recovery_codes() -> list[str]:
-    codes = [secrets.token_hex(5) for _ in range(RECOVERY_CODE_COUNT)]
-    return [f"{code[:5]}-{code[5:]}" for code in codes]
+    # 64 bit 熵（原 5 字节仅 40 bit）；已发放的旧码不受影响，下次重置生效
+    codes = [secrets.token_hex(8) for _ in range(RECOVERY_CODE_COUNT)]
+    return [f"{code[:8]}-{code[8:]}" for code in codes]
 
 
 async def lock_user(session: AsyncSession, user_id: UUID) -> User:

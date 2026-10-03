@@ -13,14 +13,14 @@ from app.core.security import Principal
 from app.models import AccessGrant, AuditEvent, OutboxEvent, User
 
 
-def record_event(
+def record_audit(
     session: AsyncSession,
     principal: Principal,
     resource_id: UUID,
     action: str,
     payload: dict,
 ) -> None:
-    """审计与 Outbox 在调用方事务内一起写入（设计 12.1）。"""
+    """只写审计、不写 Outbox（用于幂等重复动作的留痕）。"""
     session.add(
         AuditEvent(
             organization_id=principal.organization_id,
@@ -30,6 +30,17 @@ def record_event(
             payload=payload,
         )
     )
+
+
+def record_event(
+    session: AsyncSession,
+    principal: Principal,
+    resource_id: UUID,
+    action: str,
+    payload: dict,
+) -> None:
+    """审计与 Outbox 在调用方事务内一起写入（设计 12.1）。"""
+    record_audit(session, principal, resource_id, action, payload)
 
     session.add(
         OutboxEvent(
@@ -63,6 +74,7 @@ async def list_grants(
     resource_type: str,
     resource_id: UUID,
 ) -> list[AccessGrant]:
+    # 不按组织过滤：调用方须先按组织校验资源归属（写路径 grant/revoke 另有组织条件做纵深防御）
     grants = await session.scalars(
         select(AccessGrant)
         .where(
@@ -94,12 +106,15 @@ async def grant(
 
     existing = await session.scalar(
         select(AccessGrant).where(
+            AccessGrant.organization_id == principal.organization_id,
             AccessGrant.resource_type == resource_type,
             AccessGrant.resource_id == resource_id,
             AccessGrant.user_id == user_id,
         )
     )
     if existing is not None:
+        # 授权已存在：不新增记录，但写入审计，保证重复授权动作可追溯（幂等）
+        record_audit(session, principal, resource_id, action, payload)
         return existing
 
     access_grant = AccessGrant(
@@ -127,6 +142,7 @@ async def revoke(
 ) -> None:
     result = await session.execute(
         delete(AccessGrant).where(
+            AccessGrant.organization_id == principal.organization_id,
             AccessGrant.resource_type == resource_type,
             AccessGrant.resource_id == resource_id,
             AccessGrant.user_id == user_id,

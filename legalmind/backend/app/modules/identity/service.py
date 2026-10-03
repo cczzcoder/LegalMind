@@ -99,9 +99,10 @@ async def login(
             )
 
         user = await session.scalar(select(User).where(User.username == username))
-        succeeded = verify_password(user.password_hash if user else None, password) and (
-            user.is_active
-        )
+        # 即便 user 为 None 也执行一次哈希校验，保持时间恒定（verify_password 用 dummy hash 兜底）
+        password_ok = verify_password(user.password_hash if user else None, password)
+        # 显式判空，不依赖短路求值规避 user 为 None（避免改动时引入 AttributeError）
+        succeeded = password_ok and user is not None and user.is_active
 
         session.add(
             LoginAttempt(

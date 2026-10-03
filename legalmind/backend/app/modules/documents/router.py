@@ -166,8 +166,11 @@ async def get_job(job_id: UUID, session: SessionDep, principal: ReaderDep):
     # 任务可见性跟随其资料：看不到资料就看不到任务，避免借任务探测受限资料
     if job is None or job.job_type != service.PARSE_JOB:
         raise HTTPException(status_code=404, detail="Job not found")
+    document_id = job.payload.get("document_id")
+    if document_id is None:
+        raise HTTPException(status_code=404, detail="Job not found")
     try:
-        await service.get_visible_document(session, principal, UUID(job.payload["document_id"]))
+        await service.get_visible_document(session, principal, UUID(document_id))
     except HTTPException:
         raise HTTPException(status_code=404, detail="Job not found") from None
     return job

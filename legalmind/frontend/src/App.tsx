@@ -176,6 +176,7 @@ export default function App() {
 
   const mfaReady = user?.mfa_status === "ok";
 
+  // 仅作界面提示，不得作为权限依据；强制校验在后端 ROLE_PERMISSIONS
   const canWrite = mfaReady && Boolean(
     user?.roles.some((role) => ["editor", "knowledge_admin"].includes(role)),
   );

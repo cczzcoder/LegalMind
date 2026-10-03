@@ -798,3 +798,118 @@ class ProvisionVersion(Base):
         DateTime(timezone=True),
         server_default=func.now(),
     )
+
+
+# 条款关系类型（设计 5.1、8.4）。统一读作“source → target”：
+# supersede 替代、renumber 改号、split 拆分、merge 合并、cite 引用、
+# parent 上下位（source 为上位）、defines 定义与被定义（source 定义 target）
+PROVISION_RELATION_TYPES = (
+    "supersede",
+    "renumber",
+    "split",
+    "merge",
+    "cite",
+    "parent",
+    "defines",
+)
+APPLICABILITY_STATUSES = ("pending", "confirmed", "rejected")
+
+
+class ProvisionRelation(Base):
+    """条款之间的关系（设计 5.1、8.4）。
+
+    关系建在条款身份层：替代/改号/拆分/合并/上下位是身份之间的事实，跨法律版本存在，
+    图谱扩展检索（设计 8.4）需要跨版本可用。回答层对具体版本的绑定由 Citation 负责。
+    拆分或合并通过同一 source 的多行表达，天然支持多对多（设计 5.3）。
+    """
+
+    __tablename__ = "provision_relations"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_identity_id",
+            "target_identity_id",
+            "relation_type",
+            name="uq_provision_relation",
+        ),
+        # 关系必须指向两个不同的条款
+        CheckConstraint(
+            "source_identity_id <> target_identity_id",
+            name="ck_provision_relation_distinct",
+        ),
+        CheckConstraint(
+            _in("relation_type", PROVISION_RELATION_TYPES), name="ck_provision_relation_type"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        primary_key=True,
+        default=uuid4,
+    )
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    source_identity_id: Mapped[UUID] = mapped_column(
+        ForeignKey("provision_identities.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    target_identity_id: Mapped[UUID] = mapped_column(
+        ForeignKey("provision_identities.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    relation_type: Mapped[str] = mapped_column(String(30))
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+
+class ApplicabilityRecord(Base):
+    """条款的适用性记录（设计 5.1、5.3）。
+
+    设计 5.3 要求“不对所有法律版本简单施加不允许时间重叠”，复杂适用关系在此单独表达。
+    适用时间范围未知即 NULL，不虚构（设计 5.3）。
+    """
+
+    __tablename__ = "applicability_records"
+    __table_args__ = (
+        CheckConstraint(_in("status", APPLICABILITY_STATUSES), name="ck_applicability_status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        primary_key=True,
+        default=uuid4,
+    )
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    provision_identity_id: Mapped[UUID] = mapped_column(
+        ForeignKey("provision_identities.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    # 适用范围（事项/主体/地域等）；结构化字段随需求确认后收紧
+    scope: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # 依据说明（依据哪条规定、哪份文件）
+    basis: Mapped[str] = mapped_column(Text)
+    # 适用时间范围；未知为 NULL
+    effective_from: Mapped[date | None] = mapped_column(Date, nullable=True)
+    effective_to: Mapped[date | None] = mapped_column(Date, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    # 正式结论须经人工确认（设计第 20 节）
+    confirmed_by: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )

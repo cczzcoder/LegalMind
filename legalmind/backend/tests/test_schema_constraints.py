@@ -12,8 +12,11 @@ from app.core.security import hash_password
 from app.models import (
     Chunk,
     ChunkSpan,
+    LegalInstrument,
     Organization,
     ParseRevision,
+    ProvisionIdentity,
+    ProvisionRelation,
     Source,
     SourceArtifact,
     User,
@@ -56,6 +59,14 @@ EXPECTED_FOREIGN_KEYS = (
     ("provision_versions", "provision_identity_id", "provision_identities"),
     ("provision_versions", "chunk_id", "chunks"),
     ("provision_versions", "created_by", "users"),
+    ("provision_relations", "organization_id", "organizations"),
+    ("provision_relations", "source_identity_id", "provision_identities"),
+    ("provision_relations", "target_identity_id", "provision_identities"),
+    ("provision_relations", "created_by", "users"),
+    ("applicability_records", "organization_id", "organizations"),
+    ("applicability_records", "provision_identity_id", "provision_identities"),
+    ("applicability_records", "confirmed_by", "users"),
+    ("applicability_records", "created_by", "users"),
 )
 
 
@@ -188,6 +199,69 @@ async def test_chunk_span_rejects_bbox_without_coordinate_system(session_factory
                 char_end=5,
                 bbox=[0.1, 0.2, 0.3, 0.4],
                 text_sha256=_sha256(),
+            )
+        )
+        with pytest.raises(sa.exc.IntegrityError):
+            await session.flush()
+        await session.rollback()
+
+
+async def _seed_two_identities(session) -> tuple[ProvisionIdentity, ProvisionIdentity]:
+    """建一条 org → user → instrument → 两个条款身份的合法链路。"""
+    organization = Organization(name=f"org-{uuid4()}")
+    session.add(organization)
+    await session.flush()
+
+    user = User(
+        organization_id=organization.id,
+        username=f"u-{uuid4().hex[:12]}",
+        password_hash=hash_password("test-password"),
+        is_active=True,
+    )
+    session.add(user)
+    await session.flush()
+
+    instrument = LegalInstrument(
+        organization_id=organization.id,
+        title="测试法",
+        jurisdiction="CN",
+        issuing_body="测试机关",
+        instrument_type="law",
+        created_by=user.id,
+    )
+    session.add(instrument)
+    await session.flush()
+
+    first = ProvisionIdentity(
+        organization_id=organization.id,
+        instrument_id=instrument.id,
+        provision_type="article",
+        provision_number="第一条",
+        created_by=user.id,
+    )
+    second = ProvisionIdentity(
+        organization_id=organization.id,
+        instrument_id=instrument.id,
+        provision_type="article",
+        provision_number="第二条",
+        created_by=user.id,
+    )
+    session.add_all([first, second])
+    await session.flush()
+    return first, second
+
+
+async def test_provision_relation_rejects_self_reference(session_factory):
+    """关系必须指向两个不同的条款（设计 5.1：防止孤立/无意义引用）。"""
+    async with session_factory() as session:
+        first, _ = await _seed_two_identities(session)
+        session.add(
+            ProvisionRelation(
+                organization_id=first.organization_id,
+                source_identity_id=first.id,
+                target_identity_id=first.id,
+                relation_type="supersede",
+                created_by=first.created_by,
             )
         )
         with pytest.raises(sa.exc.IntegrityError):

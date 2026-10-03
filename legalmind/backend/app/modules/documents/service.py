@@ -171,18 +171,21 @@ async def read_content(
     principal: Principal,
     document_id: UUID,
 ) -> tuple[SourceArtifact, bytes]:
+    # 授权复核用独立短事务；文件处理不放进事务（设计 12.1）
     async with session.begin():
         artifact = await get_visible_document(session, principal, document_id)
-        try:
-            content = await asyncio.to_thread(storage.open, artifact.object_key)
-        except FileNotFoundError:
-            raise HTTPException(status_code=503, detail="Original file unavailable") from None
 
-        # 原件与登记哈希不符时不交付，避免把被替换的文件当作原件（设计 16.2）
-        if hashlib.sha256(content).hexdigest() != artifact.sha256:
-            raise HTTPException(status_code=503, detail="Original file failed integrity check")
+    try:
+        content = await asyncio.to_thread(storage.open, artifact.object_key)
+    except FileNotFoundError:
+        raise HTTPException(status_code=503, detail="Original file unavailable") from None
 
-        # 下载写审计（FR-11）；审计写入失败则不交付文件
+    # 原件与登记哈希不符时不交付，避免把被替换的文件当作原件（设计 16.2）
+    if hashlib.sha256(content).hexdigest() != artifact.sha256:
+        raise HTTPException(status_code=503, detail="Original file failed integrity check")
+
+    # 下载写审计（FR-11）；审计写入失败则不交付文件
+    async with session.begin():
         session.add(
             AuditEvent(
                 organization_id=principal.organization_id,

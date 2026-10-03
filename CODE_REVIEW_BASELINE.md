@@ -12,7 +12,7 @@
 | 级别 | 数量 |
 | --- | --- |
 | `[BLOCK]` | 1（已修复，见 B1） |
-| `[MAJOR]` | 6 |
+| `[MAJOR]` | 6（M1 已修复） |
 | `[MINOR]` | 10 |
 | `[NIT]` | 3 |
 
@@ -28,7 +28,7 @@
 
 ### B1 阻塞式文件 IO 在 async 请求路径中执行
 
-> **已修复（2026-10-03）**：`storage.put` / `open` / `delete` 共 4 处调用点已改为 `await asyncio.to_thread(...)`，不再阻塞事件循环。`ruff check` 通过，104 项测试通过。修复后 `read_content` 仍在事务内读取文件（见 M1），本次未一并处理。
+> **已修复（2026-10-03）**：`storage.put` / `open` / `delete` 共 4 处调用点已改为 `await asyncio.to_thread(...)`，不再阻塞事件循环。`ruff check` 通过，104 项测试通过。当时 `read_content` 仍在事务内读取文件，已在后续提交中一并处理（见 M1）。
 
 **位置**：`app/modules/documents/service.py:66`、`:176`
 **问题**：`LocalFileStorage.put()` / `open()` 是同步方法（`put` 含 `fsync` 与整文件回读校验，`open` 整文件读入），却在 `async def import_document` / `read_content` 中直接调用，**阻塞事件循环**。
@@ -48,6 +48,8 @@ await to_thread.run_sync(storage.put, key, content, sha256)
 ## `[MAJOR]` 合并前修复或书面记录
 
 ### M1 文件读取放在数据库事务内
+
+> **已修复（2026-10-03）**：`read_content` 拆为「授权短事务 → 事务外读取并校验 → 审计短事务」，文件处理不再在事务内。`ruff check` 通过，104 项测试通过。
 
 **位置**：`app/modules/documents/service.py:167-194`（`read_content`）
 **问题**：`storage.open()` 与 SHA-256 校验都在 `async with session.begin()` 内完成。
@@ -129,7 +131,7 @@ await to_thread.run_sync(storage.put, key, content, sha256)
 ## 建议修复顺序
 
 1. ~~**B1**（阻塞 IO）~~ —— **已修复（2026-10-03）**。
-2. **M1、M2** —— 触碰 R2 与恢复正确性。
+2. ~~**M1**~~（**已修复 2026-10-03**）、**M2** —— 触碰 R2 与恢复正确性。
 3. **M5、M4** —— 可观测性与查询性能，属基础设施补课。
 4. **M3、M6** —— 能力补齐与入口一致性。
 5. **MINOR / NIT** —— 随日常改动顺带处理。

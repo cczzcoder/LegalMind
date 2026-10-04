@@ -21,8 +21,8 @@ LegalInstrument（法域 + 名称）
 - 版本标识取自文件名回退/未标注、或标题退化为文件名、或出现多原件冲突 → ``review_status='pending'``
   并写审计事件，交人工确认。
 
-**多原件同版本**：同一 ``(法, 版本标识)`` 对应多个原件时按「效力状态 > 公布日期 > 导入时间 >
-docx 优于 pdf」排序，**排序更优者成为该版本的原件**并据此重建条款文本；同时置待审核并写冲突审计。
+**多原件同版本**：同一 ``(法, 版本标识)`` 对应多个原件时按「效力状态 > 公布日期 >
+docx 优于 pdf > 导入时间」排序，**排序更优者成为该版本的原件**并据此重建条款文本；同时置待审核并写冲突审计。
 ``legal_versions.legal_status`` 会做证据合并——任一原件给出确定状态即可覆盖 ``unknown``，
 这样「已公布未生效」的版本不会因为另一份缺施行日期的原件而被误判为有效（设计 §8.3）。
 """
@@ -58,7 +58,7 @@ from app.modules.parsing.chunking import text_sha256
 # 与 models.PROVISION_TYPES 一致；第一版只为「条」建身份（设计 §5.2）
 ARTICLE = "article"
 
-# 解析准确性的技术兜底：同状态、同日期的原件优先取 docx（设计 §8.3 的排序规则）
+# 解析准确性优先：同状态、同日期时 docx 稳定优于 pdf（设计 §8.3 的排序规则）
 _MEDIA_RANK = {
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": 0,
     "application/pdf": 1,
@@ -96,15 +96,20 @@ class LinkingResult:
 def _rank(
     legal_status: str,
     published_on: date | None,
-    imported_at,
     media_type: str,
+    imported_at,
 ) -> tuple:
-    """原件排序键，越小越优：效力状态 > 公布日期 > 导入时间 > 文件格式。"""
+    """原件排序键，越小越优：效力状态 > 公布日期 > 文件格式（docx 优于 pdf） > 导入时间。
+
+    **文件格式排在导入时间之前是有意的**：同一来源对同一版本同时给出 docx 与 pdf 时，
+    解析准确性更高的 docx 必须稳定胜出，不能因为 pdf 后导入就翻盘。导入时间只用于
+    同格式原件之间的取舍——重新导入的更正版应当胜出。
+    """
     return (
         STATUS_RANK.get(legal_status, _MEDIA_RANK_FALLBACK),
         -(published_on.toordinal() if published_on else 0),
-        -(imported_at.timestamp() if imported_at else 0),
         _MEDIA_RANK.get(media_type, _MEDIA_RANK_FALLBACK),
+        -(imported_at.timestamp() if imported_at else 0),
     )
 
 
@@ -230,14 +235,14 @@ async def _link_existing(
         else None
     )
     arriving_rank = _rank(
-        metadata.legal_status, metadata.promulgated_on, artifact.created_at, artifact.media_type
+        metadata.legal_status, metadata.promulgated_on, artifact.media_type, artifact.created_at
     )
     existing_rank = (
         _rank(
             version.legal_status,
             version.promulgated_on,
-            current.created_at,
             current.media_type,
+            current.created_at,
         )
         if current is not None
         else None

@@ -66,7 +66,7 @@ from app.models import (
     SourceArtifact,
 )
 from app.modules.authorization.service import AuthorizationService
-from app.modules.retrieval import keyword, vector
+from app.modules.retrieval import keyword, rewrite, vector
 from app.modules.retrieval.keyword import STRATEGIES, Strategy
 
 _ARTICLE_SORT = func.regexp_replace(ProvisionIdentity.provision_number, "[^0-9].*$", "", "g").cast(
@@ -110,22 +110,51 @@ def _dedupe(pairs: list[Pair], top_k: int) -> list[Pair]:
 
 def _keyword_retriever(strategy: Strategy) -> Retriever:
     async def search(session, principal, query: str, top_k: int) -> list[Pair]:
-        statement = (
-            select(LegalInstrument.title, ProvisionIdentity.provision_number)
-            .select_from(ProvisionVersion)
-            .join(ProvisionIdentity, ProvisionVersion.provision_identity_id == ProvisionIdentity.id)
-            .join(LegalVersion, ProvisionVersion.legal_version_id == LegalVersion.id)
-            .join(LegalInstrument, LegalVersion.instrument_id == LegalInstrument.id)
-            .join(SourceArtifact, LegalVersion.artifact_id == SourceArtifact.id)
-            .where(AuthorizationService.document_scope(principal))
-            .where(strategy.match(query))
-            .order_by(*strategy.order(query), LegalInstrument.title, _ARTICLE_SORT)
-            .limit(top_k * 3)
-        )
-        rows = (await session.execute(statement)).all()
-        return _dedupe([(title, number) for title, number in rows], top_k)
+        return await _keyword_hits(session, principal, strategy, query, top_k)
 
     return Retriever(f"keyword:{strategy.name}", strategy.summary, search)
+
+
+async def _keyword_hits(
+    session, principal: Principal, strategy: Strategy, query: str, top_k: int
+) -> list[Pair]:
+    statement = (
+        select(LegalInstrument.title, ProvisionIdentity.provision_number)
+        .select_from(ProvisionVersion)
+        .join(ProvisionIdentity, ProvisionVersion.provision_identity_id == ProvisionIdentity.id)
+        .join(LegalVersion, ProvisionVersion.legal_version_id == LegalVersion.id)
+        .join(LegalInstrument, LegalVersion.instrument_id == LegalInstrument.id)
+        .join(SourceArtifact, LegalVersion.artifact_id == SourceArtifact.id)
+        .where(AuthorizationService.document_scope(principal))
+        .where(strategy.match(query))
+        .order_by(*strategy.order(query), LegalInstrument.title, _ARTICLE_SORT)
+        .limit(top_k * 3)
+    )
+    rows = (await session.execute(statement)).all()
+    return _dedupe([(title, number) for title, number in rows], top_k)
+
+
+def _rewritten_retriever(strategy: Strategy, layers: str) -> Retriever:
+    """先改写查询再交给关键词通路，各变体结果**取并集**——并集只可能提高召回，不会降低。"""
+
+    async def search(session, principal, query: str, top_k: int) -> list[Pair]:
+        result = rewrite.rewrite(query)
+        if layers == "norm":
+            variants = (result.original, result.normalized)
+        elif layers == "strip":
+            variants = (result.original, result.normalized, result.stripped)
+        else:
+            variants = result.variants()
+        merged: list[Pair] = []
+        for variant in dict.fromkeys(item for item in variants if item):
+            merged.extend(await _keyword_hits(session, principal, strategy, variant, top_k))
+        return _dedupe(merged, top_k)
+
+    return Retriever(
+        f"keyword:{strategy.name}+{layers}",
+        f"查询改写（{layers}）+ {strategy.summary}",
+        search,
+    )
 
 
 def _vector_retriever(model_name: str, query_vectors: dict[str, list[float]], max_distance: float):
@@ -171,13 +200,21 @@ def _hybrid_retriever(parts: list[Retriever], *, depth: int, rrf_k: int) -> Retr
 
 
 def _build_retrievers(
-    paths: list[str], models: list[str], max_distance: float, rrf_k: int, depth: int
+    paths: list[str],
+    models: list[str],
+    max_distance: float,
+    rrf_k: int,
+    depth: int,
+    rewrite_layers: list[str],
 ) -> tuple[list[Retriever], dict[str, dict[str, list[float]]]]:
     """按 ``paths`` 组装要跑的检索器；向量查询向量按模型预计算一次，避免每条查询重复编码。"""
     retrievers: list[Retriever] = []
     query_vectors: dict[str, dict[str, list[float]]] = {}
     if "keyword" in paths:
         retrievers += [_keyword_retriever(strategy) for strategy in STRATEGIES]
+        # 改写消融：逐层加码，看每一层各自贡献多少
+        for layers in rewrite_layers:
+            retrievers.append(_rewritten_retriever(keyword.selected(), layers))
     if "vector" in paths or "hybrid" in paths:
         for model_name in models:
             query_vectors[model_name] = {}
@@ -326,8 +363,9 @@ def _markdown(summaries: list[dict], details: dict[str, list[dict]], top_k: int)
 async def run(args) -> int:
     paths = [item.strip() for item in args.paths.split(",") if item.strip()]
     models = [item.strip() for item in args.models.split(",") if item.strip()]
+    rewrite_layers = [item.strip() for item in args.rewrite.split(",") if item.strip()]
     retrievers, query_vectors = _build_retrievers(
-        paths, models, args.max_distance, args.rrf_k, args.depth
+        paths, models, args.max_distance, args.rrf_k, args.depth, rewrite_layers
     )
     queries = _load_queries(Path(args.dataset))
     if query_vectors:
@@ -347,6 +385,7 @@ async def run(args) -> int:
         "queries": len(queries),
         "paths": paths,
         "models": models,
+        "rewrite": rewrite_layers,
         "summary": summaries,
         "details": details,
     }
@@ -384,6 +423,11 @@ def main() -> int:
     parser.add_argument("--rrf-k", type=int, default=60)
     parser.add_argument("--depth", type=int, default=50, help="融合时每路先取多少条")
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument(
+        "--rewrite",
+        default="",
+        help="查询改写消融，逗号分隔：norm（仅规范化）,strip（+剥离疑问）,expand（+同义扩展）",
+    )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
     if not Path(args.dataset).is_file():

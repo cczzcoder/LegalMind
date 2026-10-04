@@ -49,7 +49,7 @@ from app.modules.legal_corpus.metadata import (
     extract_metadata,
     normalize_document_number,
 )
-from app.modules.legal_corpus.service import ArticleChunk, link_legal_version
+from app.modules.legal_corpus.service import ArticleChunk, link_legal_version, parse_drafts
 
 
 @dataclass(frozen=True)
@@ -396,7 +396,7 @@ async def _survivors(
         artifact = await session.get(SourceArtifact, document_id)
         if artifact is None:
             continue
-        drafts = await _parse_drafts(session, document_id)
+        drafts = await parse_drafts(session, document_id)
         if drafts is None:
             continue
         preamble, articles = drafts
@@ -426,39 +426,6 @@ async def _instruments_to_remove(
         if instrument is not None:
             names.append(instrument.title)
     return names
-
-
-async def _parse_drafts(
-    session: AsyncSession, document_id: UUID
-) -> tuple[list[str], list[ArticleChunk]] | None:
-    """从库里已有的解析产物重建 ``(前言块, 条款分块)``，供重新挂树。
-
-    前言 = 正文起点之前的内容，解析时整体成一个 ``structure_path`` 为空的分块；把该分块文本
-    当作单块传入，与原来的多块拼接等价（元数据提取本就先去掉全部空白）。取不到前言就无法可靠地
-    重新提取元数据，宁可跳过也不猜。
-    """
-    revision = await session.scalar(
-        select(ParseRevision)
-        .where(ParseRevision.artifact_id == document_id)
-        .order_by(ParseRevision.created_at.desc())
-        .limit(1)
-    )
-    if revision is None:
-        return None
-    chunks = list(
-        await session.scalars(
-            select(Chunk).where(Chunk.parse_revision_id == revision.id).order_by(Chunk.ordinal)
-        )
-    )
-    preamble = [chunk.text for chunk in chunks if not chunk.structure_path]
-    if not preamble:
-        return None
-    articles = [
-        ArticleChunk(chunk_id=chunk.id, structure_path=chunk.structure_path, text=chunk.text)
-        for chunk in chunks
-        if chunk.structure_path
-    ]
-    return preamble, articles
 
 
 async def _refresh_instrument(

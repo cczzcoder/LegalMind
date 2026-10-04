@@ -9,6 +9,7 @@
     python -m app.cli set-document-source --as kadmin --document <id> --source <id>   # 更正来源归属
     python -m app.cli withdraw-document --as kadmin --document <id> [--document <id>...] --reason 原因 [--dry-run]
     python -m app.cli withdraw-document --as kadmin --from-source <来源 id> --reason 原因 [--dry-run]
+    python -m app.cli relink-versions --as kadmin [--instrument <本体 id>...] [--dry-run]
     python -m app.cli run-worker [--once]        # 按需启动后台 worker（解析等）
 密码从终端交互输入，不经命令行参数传递，避免进入 shell 历史。
 """
@@ -54,6 +55,7 @@ from app.modules.documents import service as documents_service
 from app.modules.documents import withdrawal as documents_withdrawal
 from app.modules.identity import mfa, service
 from app.modules.identity.schemas import CreateUser
+from app.modules.legal_corpus import relink as legal_corpus_relink
 from app.modules.sources import service as sources_service
 from app.modules.sources.schemas import CreateSource, UpdateSource
 from app.workers import runner as worker_runner
@@ -162,6 +164,51 @@ async def withdraw_documents_command(
     print(f"  仍无原件而删除的版本：{list(report.remove_versions) or '无'}")
     print(f"  随之删除的法律本体：{list(report.remove_instruments) or '无'}")
     print(f"  用这些原件重建版本树：{list(report.relink_from) or '无'}")
+    if dry_run:
+        print("  这是预演，未改动任何数据；确认后去掉 --dry-run 再执行。")
+
+
+async def relink_versions_command(
+    username: str,
+    instrument_ids: list[UUID],
+    dry_run: bool,
+) -> None:
+    """按当前择优规则重挂版本树（设计 §7、§8.3）；需 source.manage，操作写审计。
+
+    重选的是「哪份原件当主原件」——属**来源归属**层面的判断（§20.3 把来源管理归知识管理员），
+    因此用 source.manage 而不是 document.write；与 withdraw-document 同一条维护路径。
+    """
+    async with SessionFactory() as session:
+        try:
+            async with session.begin():
+                principal = await cli_principal(session, username, SOURCE_MANAGE)
+            report = await legal_corpus_relink.relink_versions(
+                session,
+                principal,
+                instrument_ids=set(instrument_ids) or None,
+                dry_run=dry_run,
+            )
+        except HTTPException as error:
+            sys.exit(f"{error.status_code}: {error.detail}")
+        finally:
+            await engine.dispose()
+
+    verb = "将重挂" if dry_run else "已重挂"
+    print(
+        f"{verb} {report.instruments} 个本体的 {report.relinked} 份原件"
+        f"（候选 {report.candidates}）。"
+    )
+    for change in report.changed:
+        print(
+            f"  - {change.instrument_title} / {change.version_label}："
+            f"{change.previous_artifact or '（无）'} → {change.adopted_artifact}"
+        )
+    if not report.changed:
+        print("  主原件没有变化。")
+    if report.skipped:
+        print(f"  跳过（取不到解析产物）：{list(report.skipped)}")
+    if report.created_versions:
+        print(f"  ⚠️ 新建了版本：{list(report.created_versions)}")
     if dry_run:
         print("  这是预演，未改动任何数据；确认后去掉 --dry-run 再执行。")
 
@@ -574,6 +621,20 @@ def main() -> None:
     withdraw.add_argument("--reason", required=True, help="撤下原因（写入审计）")
     withdraw.add_argument("--dry-run", action="store_true", help="只输出将删除的内容，不改动数据")
 
+    relink = commands.add_parser(
+        "relink-versions",
+        help="按当前择优规则重挂版本树（设计 §7、§8.3；需 source.manage，操作写审计）",
+    )
+    relink.add_argument("--as", dest="actor", required=True, help="执行操作的用户名")
+    relink.add_argument(
+        "--instrument",
+        action="append",
+        type=UUID,
+        default=[],
+        help="限定本体 ID，可重复；缺省为全部",
+    )
+    relink.add_argument("--dry-run", action="store_true", help="只输出将发生的变化，不改动数据")
+
     worker = commands.add_parser(
         "run-worker", help="按需启动单进程 worker，领取并处理后台任务（设计 12.2）"
     )
@@ -664,6 +725,10 @@ def main() -> None:
                 args.actor, args.document, args.from_source, args.reason, args.dry_run
             )
         )
+        return
+
+    if args.command == "relink-versions":
+        asyncio.run(relink_versions_command(args.actor, args.instrument, args.dry_run))
         return
 
     password = getpass.getpass("Password (min 12 chars): ")

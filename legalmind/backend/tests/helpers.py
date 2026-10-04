@@ -197,6 +197,23 @@ async def import_document_for_parsing(
     return editor, document_id
 
 
+def build_minimal_docx(lines: list[str]) -> bytes:
+    """构造一个最小可解析 DOCX（python-docx），每个元素一个段落。
+
+    仅用于测试：需要「与另一种格式解析出同一版本」的原件时（例如媒体格式择优、重挂版本树）。
+    """
+    import io
+
+    from docx import Document
+
+    document = Document()
+    for line in lines:
+        document.add_paragraph(line)
+    buffer = io.BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
+
+
 def build_minimal_pdf(pages: list[list[str]], *, marker: str | None = None) -> bytes:
     """构造一个最小可解析 PDF：每页若干行 Helvetica 文本，交叉引用表偏移正确。
 

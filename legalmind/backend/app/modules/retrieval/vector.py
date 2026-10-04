@@ -23,9 +23,10 @@ from app.models import (
 )
 from app.modules.authorization.service import AuthorizationService
 
-# 余弦距离上限默认值。归一化向量下 0.6 约等于余弦相似度 0.4，是"沾边"的下限；
-# 太松会让无关条文挤进结果，太紧会漏召回——金标准上的取值见评测报告。
-DEFAULT_MAX_DISTANCE = 0.6
+# 余弦距离上限默认值。归一化向量下 0.5 约等于余弦相似度 0.5。
+# 这个值是从两份金标准一起扫出来的（见 doc/技术决策与踩坑记录.md §1.5）：
+# 0.5 时问句式召回打满且误报 0，词面召回 0.974；0.6 只会多漏 1 条误报、召回不变，所以取 0.5。
+DEFAULT_MAX_DISTANCE = 0.5
 
 
 def statement(

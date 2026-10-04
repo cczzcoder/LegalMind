@@ -44,7 +44,11 @@ from app.models import (
     SourceArtifact,
 )
 from app.modules.authorization.grants import record_event
-from app.modules.legal_corpus.metadata import UNKNOWN_STATUS, extract_metadata
+from app.modules.legal_corpus.metadata import (
+    UNKNOWN_STATUS,
+    extract_metadata,
+    normalize_document_number,
+)
 from app.modules.legal_corpus.service import ArticleChunk, link_legal_version
 
 
@@ -474,5 +478,8 @@ async def _refresh_instrument(
         return
     metadata = extract_metadata(artifact.original_filename, preamble, today=today)
     instrument.document_number = metadata.document_number
+    instrument.document_number_normalized = (
+        normalize_document_number(metadata.document_number) if metadata.document_number else None
+    )
     instrument.issuing_body = metadata.issuing_body
     instrument.instrument_type = metadata.instrument_type

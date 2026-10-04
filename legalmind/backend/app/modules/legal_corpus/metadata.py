@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import PurePosixPath
 
+from app.modules.legal_corpus.structure import chinese_number_to_int
+
 # 资料类型取值与 models.LEGAL_INSTRUMENT_TYPES 一致
 CONSTITUTION = "constitution"
 LAW = "law"
@@ -50,6 +52,10 @@ REASON_VERSION_WEAK_DATE = "version_label_from_bare_date"
 REASON_TITLE_FROM_FILENAME = "title_from_filename"
 
 _WS = re.compile(r"[\s\u3000]+")
+# 文号里的全角数字（公报文本会用），统一成半角后再比较
+_FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
+# 「第七十七号」→「第77号」；只认纯中文数字，避免误改其他内容
+_ORDER_NUMBER = re.compile(r"第([零一二三四五六七八九十百千]+)号")
 _DATE = re.compile(r"(\d{4})年(\d{1,2})月(\d{1,2})日")
 _EFFECTIVE_FROM = re.compile(r"自(\d{4})年(\d{1,2})月(\d{1,2})日起施行")
 _DOCUMENT_NUMBER = re.compile(
@@ -115,6 +121,22 @@ def normalize_title(text: str) -> str:
         previous = cleaned
         cleaned = _FILENAME_VERSION_PAREN.sub("", cleaned)
     return cleaned
+
+
+def normalize_document_number(text: str) -> str:
+    """规范化文号，供精确匹配（设计 §8.3）。
+
+    去全部空白、全角数字转半角，并把「第X号」里的中文数字转成阿拉伯数字，使
+    「中华人民共和国主席令第七十七号」与「…第77号」落到同一个值上。只做这两种等价改写，
+    不改动文号本身的结构——写错一个字的文号不该被"猜"到。
+    """
+    cleaned = _WS.sub("", text).translate(_FULLWIDTH_DIGITS)
+    return _ORDER_NUMBER.sub(_arabic_order_number, cleaned)
+
+
+def _arabic_order_number(match: re.Match) -> str:
+    value = chinese_number_to_int(match.group(1))
+    return f"第{value}号" if value is not None else match.group(0)
 
 
 def filename_title(filename: str) -> str:

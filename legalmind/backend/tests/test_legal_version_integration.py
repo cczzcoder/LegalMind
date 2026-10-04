@@ -280,6 +280,54 @@ async def test_same_source_formats_are_not_a_conflict(
         assert conflicts == 0
 
 
+async def test_provision_text_starts_at_the_article_not_the_heading(
+    make_client, make_user, storage, session_factory
+):
+    """分块段首刻意含编/章/节标题（设计 §6），但条款文本必须是「条」本身。
+
+    实测监狱法：条款文本曾变成「第一章 总 则\\n第一条 …」——分块自带章节上下文是对的，
+    但把分块文本直接拼成条款文本就把标题也算进去了。
+    """
+    name = law_name()
+    content = (
+        f"{name}\n（2026年5月1日第十四届全国人民代表大会常务委员会第一次会议通过）\n"
+        "第一章　总　　则\n第一条　为了测试，制定本法。\n"
+        "第二章　附　　则\n第二条　本法自公布之日起施行。\n"
+    ).encode()
+    editor, document_id = await import_document_for_parsing(
+        make_client, make_user, content, f"{name}.txt"
+    )
+    async with session_factory() as session:
+        await parse_artifact(session, storage, _principal(editor), document_id)
+
+    async with session_factory() as session:
+        instrument = await session.scalar(
+            select(LegalInstrument).where(LegalInstrument.title == name)
+        )
+        version = await session.scalar(
+            select(LegalVersion).where(LegalVersion.instrument_id == instrument.id)
+        )
+        provisions = {
+            provision.structure_path["article_number"]: provision
+            for provision in await session.scalars(
+                select(ProvisionVersion).where(ProvisionVersion.legal_version_id == version.id)
+            )
+        }
+
+    first, second = provisions["1"], provisions["2"]
+    assert first.text.startswith("第一条")
+    assert "第一章" not in first.text
+    assert second.text.startswith("第二条")
+    assert "第二章" not in second.text
+    # 章节标题仍在分块里（分块自带上下文），只是不再混进条款文本
+    from app.models import Chunk
+
+    async with session_factory() as session:
+        chunk = await session.get(Chunk, first.chunk_id)
+    assert "第一章" in chunk.text
+    assert first.chunk_id is not None
+
+
 async def test_new_effective_version_repeals_the_older_one(
     make_client, make_user, storage, session_factory
 ):

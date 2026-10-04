@@ -54,6 +54,8 @@ _CN_UNITS = {"十": 10, "百": 100, "千": 1000}
 
 _ARTICLE = re.compile(rf"^第([{_CN}]+)条(?:之([{_CN}]+))?")
 _HEADING = re.compile(rf"^第([{_CN}]+)(编|章|节)")
+# 空白与全角空格；条号里不允许出现，规范化时一律去掉
+_WS = re.compile(r"[\s\u3000]+")
 
 
 def chinese_number_to_int(text: str) -> int | None:
@@ -73,6 +75,33 @@ def chinese_number_to_int(text: str) -> int | None:
         else:
             return None
     return section + number
+
+
+def normalize_article_number(text: str) -> str | None:
+    """把条号规范化成 ``provision_identities.provision_number`` 的形态。
+
+    接受「第八十七条」「87」「第八十七条之一」「87之1」，统一成 ``"87"`` / ``"87之1"``；
+    解析不出来返回 ``None``。**与识别条款时用的是同一套口径**（``_article_candidate``），
+    否则写入与检索两边会分叉，精确匹配就会漏。
+    """
+    stripped = _WS.sub("", text)
+    if not stripped:
+        return None
+    if stripped.startswith("第"):
+        match = _ARTICLE.match(stripped)
+        if match is None:
+            return None
+        value = chinese_number_to_int(match.group(1))
+        if value is None:
+            return None
+        suffix = match.group(2)
+        if suffix:
+            converted = chinese_number_to_int(suffix)
+            return f"{value}之{converted}" if converted is not None else None
+        return str(value)
+    # 已经是阿拉伯数字形态
+    digits = re.fullmatch(r"(\d+)(?:之(\d+))?", stripped)
+    return stripped if digits is not None else None
 
 
 @dataclass(frozen=True)

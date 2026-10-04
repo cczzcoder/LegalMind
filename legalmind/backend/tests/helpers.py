@@ -157,14 +157,25 @@ async def setup_source(make_client, make_user) -> tuple:
 
 
 async def import_document_into_source(
-    make_client, editor, source_id, content: bytes, filename: str
+    make_client,
+    editor,
+    source_id,
+    content: bytes,
+    filename: str,
+    *,
+    access_scope: str = "organization",
 ) -> UUID:
     """在**已登记**的来源下导入一个原件，返回原件 ID（用于构造「同来源多份原件」的场景）。"""
     async with make_client() as client:
         await login(client, editor.username)
         imported = await client.post(
             "/api/v1/documents",
-            params={"source_id": source_id, "filename": filename, "sensitivity": "public"},
+            params={
+                "source_id": source_id,
+                "filename": filename,
+                "sensitivity": "public",
+                "access_scope": access_scope,
+            },
             content=content,
             headers={"Content-Type": "application/octet-stream"},
         )

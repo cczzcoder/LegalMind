@@ -641,8 +641,14 @@ class LegalInstrument(Base):
     # 制定机关
     issuing_body: Mapped[str] = mapped_column(String(200))
     instrument_type: Mapped[str] = mapped_column(String(50))
-    # 文号，原样保存；规范化字段待设计 8.3 的精确检索定型后再加
+    # 文号，原样保存供展示；精确匹配用下面的规范化字段（设计 8.3）
     document_number: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # 规范化文号（去空白、全角转半角、「第X号」中文数字转阿拉伯数字），精确匹配用
+    document_number_normalized: Mapped[str | None] = mapped_column(
+        String(200),
+        nullable=True,
+        index=True,
+    )
     # 外部权威稳定标识
     stable_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))

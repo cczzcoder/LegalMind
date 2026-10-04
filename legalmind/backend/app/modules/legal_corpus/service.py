@@ -51,6 +51,7 @@ from app.modules.legal_corpus.metadata import (
     UNKNOWN_STATUS,
     LegalMetadata,
     extract_metadata,
+    normalize_document_number,
 )
 from app.modules.parsing.chunking import text_sha256
 
@@ -298,6 +299,24 @@ async def _link_existing(
     )
 
 
+def _article_text(chunks: list[ArticleChunk]) -> str:
+    """条款文本：从条标题起算，去掉段首的编/章/节标题。
+
+    分块段首**刻意包含**章节标题（设计 §6，分块自带章节上下文），所以不能直接把分块文本拼起来
+    当条款文本——那会得到「第一章 总 则\\n第一条 …」（实测监狱法）。条标题取自
+    ``structure_path["article"]``；找不到时原样返回，宁可带上标题也不凭猜测丢正文。
+
+    注意引用锚点仍是承载该条的分块（可能同时含标题）：分块是原文定位的单位，而分块内部的精确
+    偏移要经过脱敏映射才能从脱敏文本映回原文本（设计 §21.3），本版不做。
+    """
+    text = "\n".join(chunk.text for chunk in chunks)
+    label = (chunks[0].structure_path or {}).get("article")
+    if not label:
+        return text
+    index = text.find(label)
+    return text[index:] if index > 0 else text
+
+
 def _count_provisions(version_id: UUID):
     return select(func.count(ProvisionVersion.id)).where(
         ProvisionVersion.legal_version_id == version_id
@@ -334,6 +353,7 @@ async def _get_or_create_instrument(
                 issuing_body=metadata.issuing_body,
                 instrument_type=metadata.instrument_type,
                 document_number=metadata.document_number,
+                document_number_normalized=_normalized_number(metadata.document_number),
                 created_by=principal.user_id,
             )
             .on_conflict_do_nothing(constraint="uq_legal_instrument_title")
@@ -346,7 +366,13 @@ async def _get_or_create_instrument(
         )
     elif instrument.document_number is None and metadata.document_number is not None:
         instrument.document_number = metadata.document_number
+        instrument.document_number_normalized = _normalized_number(metadata.document_number)
     return instrument
+
+
+def _normalized_number(value: str | None) -> str | None:
+    """规范化文号（设计 §8.3）；空值保持为空，不把 None 变成空串。"""
+    return normalize_document_number(value) if value else None
 
 
 async def _sync_provisions(
@@ -369,7 +395,7 @@ async def _sync_provisions(
     kept: list[UUID] = []
     for number, chunks in grouped.items():
         identity = await _get_or_create_identity(session, principal, version.instrument_id, number)
-        text = "\n".join(chunk.text for chunk in chunks)
+        text = _article_text(chunks)
         provision = await session.scalar(
             select(ProvisionVersion).where(
                 ProvisionVersion.legal_version_id == version.id,

@@ -1,6 +1,7 @@
 from datetime import date, datetime
 from uuid import UUID, uuid4
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -784,6 +785,35 @@ class ProvisionVersion(Base):
     text_sha256: Mapped[str] = mapped_column(String(64))
     created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
 
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+
+class ProvisionEmbedding(Base):
+    """条款版本的向量（设计 8.2、8.3、14.1）。
+
+    按 ``(条款版本, 模型)`` 唯一，因此同一个条款可以并存**多个模型**的向量——评测时直接横向比，
+    不必反复重算。**维度故意不写死**（不定长 ``vector`` 列 + ``dimensions`` 列自述）：
+    不同模型维度不同（BGE-M3 是 1024、text2vec-base 是 768），代价是建不了 ANN 索引、
+    只能精确最近邻——这正是设计 §8.3 要求的默认行为。
+    """
+
+    __tablename__ = "provision_embeddings"
+    __table_args__ = (
+        UniqueConstraint("provision_version_id", "model", name="uq_provision_embedding_model"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    # 不单建索引：唯一键 (provision_version_id, model) 的前导列就是它
+    provision_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("provision_versions.id", ondelete="RESTRICT")
+    )
+    # 模型标识（仓库名 + 版本，如 BAAI/bge-m3）
+    model: Mapped[str] = mapped_column(String(200), index=True)
+    dimensions: Mapped[int] = mapped_column(Integer)
+    embedding: Mapped[list[float]] = mapped_column(Vector())
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

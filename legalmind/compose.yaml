@@ -11,7 +11,9 @@ x-backend-environment: &backend-environment
 
 services:
   postgres:
-    image: postgres:17
+    # 带 pgvector 的官方镜像：原生 postgres:17 不带 vector 扩展，而设计 §14.1 的常驻服务清单
+    # 写的就是「PostgreSQL（含后续 pgvector）」，所以换镜像属于既定基线，不是新增组件。
+    image: pgvector/pgvector:pg17
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?required}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}

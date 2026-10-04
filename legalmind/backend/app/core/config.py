@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     worker_backoff_base_seconds: int = 30
     worker_backoff_max_seconds: int = 900
 
+    # 本地嵌入模型（设计 8.2、9.5）。数据不默认外发，因此只用本地模型；
+    # 权重目录默认落在仓库的 data/ 下（已 gitignore），C 盘紧张时用 EMBEDDING_MODEL_DIR 指到别的盘。
+    embedding_model_dir: str = "data/models"
+    # 模型权重下载源。本机 HuggingFace 直连不通，默认走镜像（其元数据 API 403 不影响下载）。
+    hf_endpoint: str = "https://hf-mirror.com"
+
     @field_validator("mfa_encryption_key", mode="before")
     @classmethod
     def empty_key_is_unset(cls, value):

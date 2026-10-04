@@ -1,18 +1,25 @@
-"""中文关键词检索方案选型（设计 §8.2、§8.3、§17.1）。
+"""检索通路选型：关键词 / 向量 / 混合（设计 §8.2、§8.3、§17.1）。
 
-§8.3 要求关键词方案「用测试集选型」。本脚本把 ``app.modules.retrieval.keyword`` 里的候选实现
-跑在金标准上，比 **Recall@k / MRR / 误报 / 耗时**，报告写到 ``evaluations/reports/``。
+§8.3 要求中文关键词方案「用测试集选型」；§8.2 的多路检索里还有向量通路。本脚本把候选实现跑在
+**同一份金标准**上，比 Recall@k / 准确率 / MRR / 误报 / 耗时，报告写到 ``evaluations/reports/``。
 
-**金标准**（``evaluations/datasets/retrieval_queries.json``）：期望集 = 全库中「去空白文本」
-包含全部 terms 的（法, 条）。去空白是为了不被 PDF 折行空格影响（实测「民用航 空器」），
-每条查询的出处记在 ``note`` 里。它衡量的是**词面命中**，不是语义召回——语义那一层要等向量
-通路，不能拿它下结论。
+**金标准**（``evaluations/datasets/retrieval_queries.json``）：期望集 = 全库中「去空白文本」包含
+全部 terms 的（法, 条）。去空白是为了不被 PDF 折行空格影响（实测「民用航 空器」）。它衡量的是
+**词面命中**，不是语义召回——所以向量通路在这份金标准上只反映「它能不能找到同一个条款」，
+**不能据此判断它处理同义改写的本事**（那需要另一份问句式金标准，尚未建立）。
 
 跑法::
 
     set -a && . ./.env && set +a
     export DATABASE_URL="postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}"
-    .venv/Scripts/python.exe scripts/evaluate_retrieval.py [--top-k 20] [--json]
+
+    # 只比关键词（不需要嵌入依赖）
+    .venv/Scripts/python.exe scripts/evaluate_retrieval.py
+
+    # 加上向量与混合（会加载本地嵌入模型，首次要下载权重）
+    .venv/Scripts/python.exe scripts/evaluate_retrieval.py \
+        --paths keyword,vector,hybrid \
+        --models BAAI/bge-m3,shibing624/text2vec-base-chinese
 """
 
 import argparse
@@ -21,6 +28,8 @@ import json
 import os
 import sys
 import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -57,11 +66,22 @@ from app.models import (
     SourceArtifact,
 )
 from app.modules.authorization.service import AuthorizationService
+from app.modules.retrieval import keyword, vector
 from app.modules.retrieval.keyword import STRATEGIES, Strategy
 
 _ARTICLE_SORT = func.regexp_replace(ProvisionIdentity.provision_number, "[^0-9].*$", "", "g").cast(
     Integer
 )
+
+Pair = tuple[str, str]
+Search = Callable[[object, Principal, str, int], Awaitable[list[Pair]]]
+
+
+@dataclass(frozen=True)
+class Retriever:
+    name: str
+    summary: str
+    search: Search
 
 
 def _load_queries(path: Path) -> list[dict]:
@@ -70,43 +90,116 @@ def _load_queries(path: Path) -> list[dict]:
 
 
 async def _prepare(session) -> None:
-    """候选 trigram / word_trigram 需要 pg_trgm。它随 PostgreSQL 提供，不是新增常驻组件（§18）。"""
+    """``trigram`` / ``word_trigram`` 两个候选需要 pg_trgm（``vector`` 由迁移 0015 启用）。
+
+    pg_trgm 随 PostgreSQL 提供，不是新增常驻组件（设计 §18）。
+    """
     await session.execute(sql_text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
     await session.commit()
 
 
-def _statement(strategy: Strategy, query: str, principal: Principal, limit: int):
-    return (
-        select(LegalInstrument.title, ProvisionIdentity.provision_number)
-        .select_from(ProvisionVersion)
-        .join(ProvisionIdentity, ProvisionVersion.provision_identity_id == ProvisionIdentity.id)
-        .join(LegalVersion, ProvisionVersion.legal_version_id == LegalVersion.id)
-        .join(LegalInstrument, LegalVersion.instrument_id == LegalInstrument.id)
-        .join(SourceArtifact, LegalVersion.artifact_id == SourceArtifact.id)
-        .where(AuthorizationService.document_scope(principal))
-        .where(strategy.match(query))
-        .order_by(*strategy.order(query), LegalInstrument.title, _ARTICLE_SORT)
-        .limit(limit)
+def _dedupe(pairs: list[Pair], top_k: int) -> list[Pair]:
+    seen: list[Pair] = []
+    for pair in pairs:
+        if pair not in seen:
+            seen.append(pair)
+        if len(seen) == top_k:
+            break
+    return seen
+
+
+def _keyword_retriever(strategy: Strategy) -> Retriever:
+    async def search(session, principal, query: str, top_k: int) -> list[Pair]:
+        statement = (
+            select(LegalInstrument.title, ProvisionIdentity.provision_number)
+            .select_from(ProvisionVersion)
+            .join(ProvisionIdentity, ProvisionVersion.provision_identity_id == ProvisionIdentity.id)
+            .join(LegalVersion, ProvisionVersion.legal_version_id == LegalVersion.id)
+            .join(LegalInstrument, LegalVersion.instrument_id == LegalInstrument.id)
+            .join(SourceArtifact, LegalVersion.artifact_id == SourceArtifact.id)
+            .where(AuthorizationService.document_scope(principal))
+            .where(strategy.match(query))
+            .order_by(*strategy.order(query), LegalInstrument.title, _ARTICLE_SORT)
+            .limit(top_k * 3)
+        )
+        rows = (await session.execute(statement)).all()
+        return _dedupe([(title, number) for title, number in rows], top_k)
+
+    return Retriever(f"keyword:{strategy.name}", strategy.summary, search)
+
+
+def _vector_retriever(model_name: str, query_vectors: dict[str, list[float]], max_distance: float):
+    async def search(session, principal, query: str, top_k: int) -> list[Pair]:
+        query_vector = query_vectors.get(query)
+        if query_vector is None:
+            return []
+        statement = vector.statement(
+            model=model_name,
+            query_vector=query_vector,
+            principal=principal,
+            limit=top_k * 3,
+            max_distance=max_distance,
+        )
+        rows = (await session.execute(statement)).all()
+        # 语句返回 (ProvisionVersion, ProvisionIdentity, LegalVersion, LegalInstrument, SourceArtifact)
+        return _dedupe([(row[3].title, row[1].provision_number) for row in rows], top_k)
+
+    return Retriever(
+        f"vector:{model_name}",
+        f"向量通路（{model_name}），余弦距离 ≤ {max_distance}，按距离升序",
+        search,
     )
 
 
-async def _run_query(session, strategy: Strategy, query: str, principal: Principal, top_k: int):
-    """返回 top-k 的 (法, 条) 列表；同一（法, 条）可能有多个版本，去重后取前 top_k。"""
-    started = time.perf_counter()
-    rows = (await session.execute(_statement(strategy, query, principal, top_k * 3))).all()
-    elapsed_ms = (time.perf_counter() - started) * 1000
-    seen: list[tuple[str, str]] = []
-    for title, number in rows:
-        key = (title, number)
-        if key not in seen:
-            seen.append(key)
-        if len(seen) == top_k:
-            break
-    return seen, elapsed_ms
+def _hybrid_retriever(parts: list[Retriever], *, depth: int, rrf_k: int) -> Retriever:
+    """RRF 融合（设计 §8.2 第 6 步）：score = Σ 1/(k + 名次)，与各路的分值尺度无关。"""
+
+    async def search(session, principal, query: str, top_k: int) -> list[Pair]:
+        scores: dict[Pair, float] = {}
+        for part in parts:
+            hits = await part.search(session, principal, query, depth)
+            for rank, pair in enumerate(hits, start=1):
+                scores[pair] = scores.get(pair, 0.0) + 1.0 / (rrf_k + rank)
+        ordered = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
+        return [pair for pair, _score in ordered][:top_k]
+
+    return Retriever(
+        "hybrid:" + "+".join(part.name.split(":", 1)[1] for part in parts),
+        "RRF 融合（k=" + str(rrf_k) + "）：" + " ＋ ".join(part.name for part in parts),
+        search,
+    )
 
 
-def _score(hits: list[tuple[str, str]], expect: set[tuple[str, str]], top_k: int) -> dict:
-    """单条查询的打分。命中集按 top_k 截断（超出 k 的不算）。"""
+def _build_retrievers(
+    paths: list[str], models: list[str], max_distance: float, rrf_k: int, depth: int
+) -> tuple[list[Retriever], dict[str, dict[str, list[float]]]]:
+    """按 ``paths`` 组装要跑的检索器；向量查询向量按模型预计算一次，避免每条查询重复编码。"""
+    retrievers: list[Retriever] = []
+    query_vectors: dict[str, dict[str, list[float]]] = {}
+    if "keyword" in paths:
+        retrievers += [_keyword_retriever(strategy) for strategy in STRATEGIES]
+    if "vector" in paths or "hybrid" in paths:
+        for model_name in models:
+            query_vectors[model_name] = {}
+            retrievers.append(
+                _vector_retriever(model_name, query_vectors[model_name], max_distance)
+            )
+    if "hybrid" in paths:
+        for model_name in models:
+            retrievers.append(
+                _hybrid_retriever(
+                    [
+                        _keyword_retriever(keyword.selected()),
+                        _vector_retriever(model_name, query_vectors[model_name], max_distance),
+                    ],
+                    depth=depth,
+                    rrf_k=rrf_k,
+                )
+            )
+    return retrievers, query_vectors
+
+
+def _score(hits: list[Pair], expect: set[Pair], top_k: int) -> dict:
     limited = hits[:top_k]
     found = [hit for hit in limited if hit in expect]
     rank = next((index + 1 for index, hit in enumerate(limited) if hit in expect), None)
@@ -118,8 +211,37 @@ def _score(hits: list[tuple[str, str]], expect: set[tuple[str, str]], top_k: int
     }
 
 
+def _summarise(retriever: Retriever, per_query: list[dict], top_k: int) -> dict:
+    scored = [row for row in per_query if row["recall"] is not None]
+    total_expect = sum(len(row["expect"]) for row in scored)
+    total_found = sum(row["found"] for row in scored)
+    total_hits = sum(len(row["hits"]) for row in scored)
+    return {
+        "retriever": retriever.name,
+        "summary": retriever.summary,
+        "top_k": top_k,
+        "queries": len(per_query),
+        "recall": round(total_found / total_expect, 4) if total_expect else 0.0,
+        "precision": round(total_found / total_hits, 4) if total_hits else None,
+        "recall_at_1": round(
+            sum(row["recall"] for row in scored if row["rank"] == 1) / len(scored)
+            if scored
+            else 0.0,
+            4,
+        ),
+        "mrr": round(
+            sum(row["reciprocal_rank"] for row in scored) / len(scored) if scored else 0.0, 4
+        ),
+        "no_hit_false_positives": sum(
+            1 for row in per_query if row["type"] == "no_hit" and row["hits"]
+        ),
+        "errors": sum(1 for row in per_query if row["error"]),
+        "avg_ms": round(sum(row["elapsed_ms"] for row in per_query) / len(per_query), 2),
+    }
+
+
 async def evaluate(
-    dataset: Path, top_k: int
+    dataset: Path, top_k: int, retrievers: list[Retriever]
 ) -> tuple[list[dict], dict[str, list[dict]], list[dict]]:
     queries = _load_queries(dataset)
     principal = Principal(organization_id=uuid4(), user_id=uuid4(), roles=frozenset())
@@ -128,17 +250,17 @@ async def evaluate(
 
     async with SessionFactory() as session:
         await _prepare(session)
-        for strategy in STRATEGIES:
+        for retriever in retrievers:
             per_query: list[dict] = []
             for item in queries:
                 expect = {(title, number) for title, number in item["expect"]}
                 try:
-                    hits, elapsed_ms = await _run_query(
-                        session, strategy, item["query"], principal, top_k
-                    )
+                    started = time.perf_counter()
+                    hits = await retriever.search(session, principal, item["query"], top_k)
+                    elapsed_ms = (time.perf_counter() - started) * 1000
                     score = _score(hits, expect, top_k)
                     error = None
-                except Exception as failure:  # noqa: BLE001 - 候选失败要如实记下来，不能让整轮中断
+                except Exception as failure:  # noqa: BLE001 - 候选失败要如实记下，不能让整轮中断
                     hits, elapsed_ms, error = [], 0.0, f"{type(failure).__name__}: {failure}"
                     score = {"found": 0, "rank": None, "recall": None, "reciprocal_rank": 0.0}
                 per_query.append(
@@ -153,49 +275,15 @@ async def evaluate(
                         "error": error,
                     }
                 )
-            scored = [row for row in per_query if row["recall"] is not None]
-            total_expect = sum(len(row["expect"]) for row in scored)
-            total_found = sum(row["found"] for row in scored)
-            total_hits = sum(len(row["hits"]) for row in scored)
-            summaries.append(
-                {
-                    "strategy": strategy.name,
-                    "summary": strategy.summary,
-                    "top_k": top_k,
-                    "queries": len(per_query),
-                    "scored_queries": len(scored),
-                    "recall": round(total_found / total_expect, 4) if total_expect else 0.0,
-                    # 返回的结果里有多少是真正期望的——召回高但夹带一堆无关条文时这里会掉下来
-                    "precision": round(total_found / total_hits, 4) if total_hits else None,
-                    "recall_at_1": round(
-                        sum(row["recall"] for row in scored if row["rank"] == 1) / len(scored)
-                        if scored
-                        else 0.0,
-                        4,
-                    ),
-                    "mrr": round(
-                        sum(row["reciprocal_rank"] for row in scored) / len(scored)
-                        if scored
-                        else 0.0,
-                        4,
-                    ),
-                    "no_hit_false_positives": sum(
-                        1 for row in per_query if row["type"] == "no_hit" and row["hits"]
-                    ),
-                    "errors": sum(1 for row in per_query if row["error"]),
-                    "avg_ms": round(
-                        sum(row["elapsed_ms"] for row in per_query) / len(per_query), 2
-                    ),
-                }
-            )
-            details[strategy.name] = per_query
+            summaries.append(_summarise(retriever, per_query, top_k))
+            details[retriever.name] = per_query
     return summaries, details, queries
 
 
 def _markdown(summaries: list[dict], details: dict[str, list[dict]], top_k: int) -> str:
     now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     out = [
-        "# 中文关键词检索方案选型",
+        "# 检索通路选型（关键词 / 向量 / 混合）",
         "",
         f"生成时间：{now}　top-k：{top_k}",
         "",
@@ -203,18 +291,17 @@ def _markdown(summaries: list[dict], details: dict[str, list[dict]], top_k: int)
         "",
         "## 汇总",
         "",
-        "| 方案 | Recall | 准确率 | Rank@1 命中率 | MRR | 无命中查询误报 | 错误 | 平均耗时 ms |",
+        "| 通路 | Recall | 准确率 | Rank@1 | MRR | 无命中查询误报 | 错误 | 平均耗时 ms |",
         "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for row in summaries:
         out.append(
-            f"| `{row['strategy']}` | {row['recall']} | {row['precision']} | "
-            f"{row['recall_at_1']} | {row['mrr']} | "
-            f"{row['no_hit_false_positives']} | {row['errors']} | {row['avg_ms']} |"
+            f"| `{row['retriever']}` | {row['recall']} | {row['precision']} | {row['recall_at_1']} | "
+            f"{row['mrr']} | {row['no_hit_false_positives']} | {row['errors']} | {row['avg_ms']} |"
         )
-    out += ["", "## 方案说明", ""]
+    out += ["", "## 通路说明", ""]
     for row in summaries:
-        out.append(f"- `{row['strategy']}`：{row['summary']}")
+        out.append(f"- `{row['retriever']}`：{row['summary']}")
     out += ["", "## 逐条明细", ""]
     for name, rows in details.items():
         out.append(f"### {name}")
@@ -236,50 +323,76 @@ def _markdown(summaries: list[dict], details: dict[str, list[dict]], top_k: int)
     return "\n".join(out) + "\n"
 
 
-async def run(dataset: Path, out_dir: Path, top_k: int, print_json: bool) -> int:
-    summaries, details, queries = await evaluate(dataset, top_k)
+async def run(args) -> int:
+    paths = [item.strip() for item in args.paths.split(",") if item.strip()]
+    models = [item.strip() for item in args.models.split(",") if item.strip()]
+    retrievers, query_vectors = _build_retrievers(
+        paths, models, args.max_distance, args.rrf_k, args.depth
+    )
+    queries = _load_queries(Path(args.dataset))
+    if query_vectors:
+        from app.adapters import embedding
+
+        texts = [item["query"] for item in queries]
+        for model_name, cache in query_vectors.items():
+            print(f"编码 {len(texts)} 条查询向量：{model_name} …")
+            vectors = embedding.encode(model_name, texts, batch_size=args.batch_size)
+            cache.update(zip(texts, vectors, strict=True))
+
+    summaries, details, _ = await evaluate(Path(args.dataset), args.top_k, retrievers)
     payload = {
         "generated_at": datetime.now(UTC).isoformat(),
-        "dataset": str(dataset),
-        "top_k": top_k,
+        "dataset": args.dataset,
+        "top_k": args.top_k,
         "queries": len(queries),
+        "paths": paths,
+        "models": models,
         "summary": summaries,
         "details": details,
     }
+    out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     json_path = out_dir / f"retrieval_eval_{stamp}.json"
     md_path = out_dir / f"retrieval_eval_{stamp}.md"
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    md_path.write_text(_markdown(summaries, details, top_k), encoding="utf-8")
+    md_path.write_text(_markdown(summaries, details, args.top_k), encoding="utf-8")
 
-    header = f"{'方案':<18}{'Recall':>8}{'准确率':>8}{'Rank@1':>9}{'MRR':>8}{'误报':>6}{'错误':>6}{'ms':>8}"
+    header = f"{'通路':<44}{'Recall':>8}{'准确率':>8}{'Rank@1':>9}{'MRR':>8}{'误报':>6}{'ms':>8}"
     print(header)
     print("-" * len(header))
     for row in summaries:
         print(
-            f"{row['strategy']:<18}{row['recall']:>8}{row['precision']!s:>8}"
+            f"{row['retriever']:<44}{row['recall']:>8}{row['precision']!s:>8}"
             f"{row['recall_at_1']:>9}{row['mrr']:>8}"
-            f"{row['no_hit_false_positives']:>6}{row['errors']:>6}{row['avg_ms']:>8}"
+            f"{row['no_hit_false_positives']:>6}{row['avg_ms']:>8}"
         )
     print(f"\nJSON: {json_path}\nMD:   {md_path}")
-    if print_json:
+    if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="中文关键词检索方案选型（只读）")
+    parser = argparse.ArgumentParser(description="检索通路选型（只读）")
     parser.add_argument("--dataset", default=str(DEFAULT_DATASET))
     parser.add_argument("--out", default=str(DEFAULT_OUT))
     parser.add_argument("--top-k", type=int, default=20)
+    parser.add_argument("--paths", default="keyword", help="逗号分隔：keyword,vector,hybrid")
+    parser.add_argument("--models", default="", help="逗号分隔的嵌入模型；vector/hybrid 需要")
+    parser.add_argument("--max-distance", type=float, default=vector.DEFAULT_MAX_DISTANCE)
+    parser.add_argument("--rrf-k", type=int, default=60)
+    parser.add_argument("--depth", type=int, default=50, help="融合时每路先取多少条")
+    parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
-    dataset = Path(args.dataset)
-    if not dataset.is_file():
-        print(f"dataset not found: {dataset}", file=sys.stderr)
+    if not Path(args.dataset).is_file():
+        print(f"dataset not found: {args.dataset}", file=sys.stderr)
         return 2
-    return asyncio.run(run(dataset, Path(args.out), args.top_k, args.json))
+    if ("vector" in args.paths or "hybrid" in args.paths) and not args.models:
+        print("--paths 含 vector/hybrid 时必须给 --models", file=sys.stderr)
+        return 2
+    return asyncio.run(run(args))
 
 
 if __name__ == "__main__":

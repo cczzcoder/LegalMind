@@ -199,6 +199,27 @@ def _hybrid_retriever(parts: list[Retriever], *, depth: int, rrf_k: int) -> Retr
     )
 
 
+def _cascade_retriever(primary: Retriever, fallback: Retriever) -> Retriever:
+    """关键词（含改写）优先，**命中为空才走向量**。
+
+    依据是实测：关键词命中时准确率 1.000，而向量通路永远返回 top-k、必然夹带无关条文
+    （词面集上准确率 0.074）。盲目 RRF 融合等于把这份噪声加到关键词上（准确率 1.000 → 0.076），
+    所以这里改成「先精确、空了再兜底语义」——两边各自的强项都不受损。
+    """
+
+    async def search(session, principal, query: str, top_k: int) -> list[Pair]:
+        hits = await primary.search(session, principal, query, top_k)
+        if hits:
+            return hits
+        return await fallback.search(session, principal, query, top_k)
+
+    return Retriever(
+        "cascade:" + primary.name.split(":", 1)[1] + ">" + fallback.name.split(":", 1)[1],
+        f"级联：先 {primary.name}，命中为空再 {fallback.name}",
+        search,
+    )
+
+
 def _build_retrievers(
     paths: list[str],
     models: list[str],
@@ -231,6 +252,14 @@ def _build_retrievers(
                     ],
                     depth=depth,
                     rrf_k=rrf_k,
+                )
+            )
+    if "cascade" in paths:
+        for model_name in models:
+            retrievers.append(
+                _cascade_retriever(
+                    _rewritten_retriever(keyword.selected(), "expand"),
+                    _vector_retriever(model_name, query_vectors[model_name], max_distance),
                 )
             )
     return retrievers, query_vectors

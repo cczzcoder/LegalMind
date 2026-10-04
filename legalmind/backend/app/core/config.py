@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     # 本地嵌入模型（设计 8.2、9.5）。数据不默认外发，因此只用本地模型；
     # 权重目录默认落在仓库的 data/ 下（已 gitignore），C 盘紧张时用 EMBEDDING_MODEL_DIR 指到别的盘。
     embedding_model_dir: str = "data/models"
+    # 检索用的嵌入模型。金标准选型结论见 doc/技术决策与踩坑记录.md §1.5：BGE-M3 召回 1.000、
+    # text2vec 0.917，故选 BGE-M3。
+    embedding_model: str = "BAAI/bge-m3"
     # 模型权重下载源。本机 HuggingFace 直连不通，默认走镜像（其元数据 API 403 不影响下载）。
     hf_endpoint: str = "https://hf-mirror.com"
 

@@ -36,10 +36,12 @@ def statement(
     principal: Principal,
     limit: int,
     max_distance: float | None = DEFAULT_MAX_DISTANCE,
+    filters: list | None = None,
 ) -> Select:
     """向量通路的查询：返回与精确/关键词通路**相同的实体列**，便于复用同一套 `_hit`。
 
-    授权仍在数据库里复核（设计 §11.2），与另外两条通路一致。
+    授权仍在数据库里复核（设计 §11.2），与另外两条通路一致。``filters`` 是精确字段与过滤条件，
+    由调用方传入，保证三条通路口径一致。
     """
     distance = ProvisionEmbedding.embedding.cosine_distance(query_vector)
     statement = (
@@ -55,6 +57,8 @@ def statement(
         .order_by(distance)
         .limit(limit)
     )
+    if filters:
+        statement = statement.where(*filters)
     if max_distance is not None:
         statement = statement.where(distance <= max_distance)
     return statement

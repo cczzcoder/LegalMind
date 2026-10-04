@@ -1,9 +1,12 @@
-"""精确字段检索与中文关键词检索（设计 §8.2 的精确/关键词通路、§8.3）。
+"""精确字段、中文关键词与向量兜底检索（设计 §8.2、§8.3）。
 
-**精确字段**：名称、文号、稳定 ID、规范化条号的精确匹配。
-**关键词**（V1.11）：``query.keyword`` 走 ``keyword.selected()`` 选中的方案——金标准选型结果见
-``app/modules/retrieval/keyword.py``。两条通路都是**过滤条件**（与法域、类型、日期、效力、
-授权一起 AND），结果按关键词相关性再稳定排序；**RRF 融合与向量、图谱通路属 P4**，尚未实现。
+**三条通路**：精确字段（名称 / 文号 / 稳定 ID / 规范化条号）、关键词（``keyword``）、
+自然语言（``semantic``，级联）。
+
+**``semantic`` 走级联，不是盲目融合**：先用关键词（含查询改写）在原文里找，命中为空才用本地嵌入
+模型走向量。依据是实测（``doc/技术决策与踩坑记录.md`` §1.6）——关键词命中时准确率 1.000，向量
+通路永远返回 top-k、必然夹带无关条文；RRF 融合等于把噪声加到关键词上（准确率 1.000 → 0.035），
+而级联在三份金标准上都取到两边的强项。**图谱通路尚未实现。**
 
 **授权在数据库里复核**（设计 §11.2、§8.3）：查询直接 join 到原件并套用
 ``AuthorizationService.document_scope``，不信任调用方提交的范围。受限原件（``restricted``）
@@ -22,9 +25,12 @@
 
 from uuid import UUID
 
+from fastapi import HTTPException
 from sqlalchemy import Integer, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.adapters import embedding
+from app.core.config import get_settings
 from app.core.security import Principal
 from app.models import (
     Chunk,
@@ -42,7 +48,7 @@ from app.modules.legal_corpus.metadata import (
     normalize_title,
 )
 from app.modules.legal_corpus.structure import normalize_article_number
-from app.modules.retrieval import keyword
+from app.modules.retrieval import keyword, rewrite, vector
 from app.modules.retrieval.schemas import (
     CitationOut,
     ProvisionHit,
@@ -61,86 +67,153 @@ async def search_provisions(
     principal: Principal,
     query: SearchQuery,
 ) -> SearchResponse:
-    """按精确字段与过滤条件检索条款版本。"""
-    async with session.begin():
-        statement = (
-            select(
-                ProvisionVersion, ProvisionIdentity, LegalVersion, LegalInstrument, SourceArtifact
-            )
-            .join(
-                ProvisionIdentity,
-                ProvisionVersion.provision_identity_id == ProvisionIdentity.id,
-            )
-            .join(LegalVersion, ProvisionVersion.legal_version_id == LegalVersion.id)
-            .join(LegalInstrument, LegalVersion.instrument_id == LegalInstrument.id)
-            # 内连接：没有原件的版本（原件被撤下后尚未重建）不参与检索
-            .join(SourceArtifact, LegalVersion.artifact_id == SourceArtifact.id)
-            .where(AuthorizationService.document_scope(principal))
-        )
+    """按精确字段、关键词或自然语言检索条款版本（设计 §8.2、§8.3）。
 
-        if query.instrument_title:
-            statement = statement.where(
-                LegalInstrument.title == normalize_title(query.instrument_title)
-            )
-        if query.document_number:
-            statement = statement.where(
-                LegalInstrument.document_number_normalized
-                == normalize_document_number(query.document_number)
-            )
-        if query.stable_id:
-            statement = statement.where(LegalInstrument.stable_id == query.stable_id)
-        if query.jurisdiction:
-            statement = statement.where(LegalInstrument.jurisdiction == query.jurisdiction)
-        if query.instrument_types:
-            statement = statement.where(LegalInstrument.instrument_type.in_(query.instrument_types))
-        if query.article_number:
-            normalized = normalize_article_number(query.article_number)
-            if normalized is None:
-                # 条号解析不出来就直接返回空结果，而不是退化成"不过滤"——静默放宽条件最危险。
-                # 也不能拿哨兵值去比较：PostgreSQL 不接受字符串里的 NUL 字节。
-                return SearchResponse(hits=[], truncated=False)
-            statement = statement.where(ProvisionIdentity.provision_number == normalized)
+    ``semantic`` 走**级联**：先用关键词（含查询改写）在原文里找，命中为空才用本地嵌入模型走向量。
+    依据是实测（`doc/技术决策与踩坑记录.md` §1.6）：关键词命中时准确率 1.000，而向量通路永远返回
+    top-k、必然夹带无关条文；**盲目 RRF 融合等于把这份噪声加到关键词上**（词面集准确率
+    1.000 → 0.035），级联则在三份金标准上都取到两边的强项。
+    """
+    if query.semantic and query.keyword:
+        raise HTTPException(status_code=422, detail="Give either keyword or semantic, not both")
+    if query.article_number and normalize_article_number(query.article_number) is None:
+        # 条号解析不出来就直接返回空结果，而不是退化成"不过滤"——静默放宽条件最危险。
+        # 也不能拿哨兵值去比较：PostgreSQL 不接受字符串里的 NUL 字节。
+        return SearchResponse(hits=[], truncated=False)
 
-        order_by: list = [LegalInstrument.title, LegalVersion.version_label, _ARTICLE_SORT]
-        if query.keyword:
-            # 关键词通路：方案由金标准选型（见 keyword.SELECTED），自带相关性排序，
-            # 放在稳定排序之前——命中的条文越短越聚焦。
-            strategy = keyword.selected()
-            statement = statement.where(strategy.match(query.keyword))
-            order_by = [*strategy.order(query.keyword), *order_by]
-
-        if not query.include_not_yet_effective:
-            statement = statement.where(LegalVersion.legal_status != NOT_YET_EFFECTIVE)
-        if query.effective_on is not None:
-            statement = statement.where(
-                or_(
-                    LegalVersion.effective_from.is_(None),
-                    LegalVersion.effective_from <= query.effective_on,
-                ),
-                or_(
-                    LegalVersion.effective_to.is_(None),
-                    LegalVersion.effective_to > query.effective_on,
-                ),
-            )
-        if query.review_statuses:
-            statement = statement.where(LegalVersion.review_status.in_(query.review_statuses))
-
-        statement = (
-            statement.order_by(*order_by)
-            # 多取一行用来判断是否被截断，省一次 count 查询
-            .limit(query.limit + 1)
-        )
-        rows = list((await session.execute(statement)).all())
-        truncated = len(rows) > query.limit
-        rows = rows[: query.limit]
-
-        spans = await _article_spans(session, [row[0] for row in rows])
+    filters = _filters(query)
+    if query.semantic:
+        async with session.begin():
+            rows, truncated, spans = await _keyword_arm(session, principal, query, filters)
+        path = "keyword"
+        if not rows:
+            # 模型调用放在事务外（设计 §12.1）；首次会下载/加载模型（约 2 GB 常驻）
+            query_vector = embedding.encode(get_settings().embedding_model, [query.semantic])[0]
+            async with session.begin():
+                rows, truncated, spans = await _vector_arm(
+                    session, principal, query, filters, query_vector
+                )
+            path = "vector"
+    else:
+        async with session.begin():
+            rows, truncated, spans = await _single(session, principal, query, filters)
+        path = "keyword" if query.keyword else "exact"
 
     hits = [
         _hit(provision, identity, version, instrument, artifact, spans.get(provision.id))
         for provision, identity, version, instrument, artifact in rows
     ]
-    return SearchResponse(hits=hits, truncated=truncated)
+    return SearchResponse(hits=hits, truncated=truncated, path=path)
+
+
+def _filters(query: SearchQuery) -> list:
+    """精确字段与过滤条件——三条通路（精确 / 关键词 / 向量）**共用同一套**，保证口径一致。"""
+    conditions: list = []
+    if query.instrument_title:
+        conditions.append(LegalInstrument.title == normalize_title(query.instrument_title))
+    if query.document_number:
+        conditions.append(
+            LegalInstrument.document_number_normalized
+            == normalize_document_number(query.document_number)
+        )
+    if query.stable_id:
+        conditions.append(LegalInstrument.stable_id == query.stable_id)
+    if query.jurisdiction:
+        conditions.append(LegalInstrument.jurisdiction == query.jurisdiction)
+    if query.instrument_types:
+        conditions.append(LegalInstrument.instrument_type.in_(query.instrument_types))
+    if query.article_number:
+        # 可解析性已在 search_provisions 里检查过
+        conditions.append(
+            ProvisionIdentity.provision_number == normalize_article_number(query.article_number)
+        )
+    if not query.include_not_yet_effective:
+        conditions.append(LegalVersion.legal_status != NOT_YET_EFFECTIVE)
+    if query.effective_on is not None:
+        conditions += [
+            or_(
+                LegalVersion.effective_from.is_(None),
+                LegalVersion.effective_from <= query.effective_on,
+            ),
+            or_(
+                LegalVersion.effective_to.is_(None),
+                LegalVersion.effective_to > query.effective_on,
+            ),
+        ]
+    if query.review_statuses:
+        conditions.append(LegalVersion.review_status.in_(query.review_statuses))
+    return conditions
+
+
+def _base_statement(principal: Principal, filters: list):
+    return (
+        select(ProvisionVersion, ProvisionIdentity, LegalVersion, LegalInstrument, SourceArtifact)
+        .select_from(ProvisionVersion)
+        .join(ProvisionIdentity, ProvisionVersion.provision_identity_id == ProvisionIdentity.id)
+        .join(LegalVersion, ProvisionVersion.legal_version_id == LegalVersion.id)
+        .join(LegalInstrument, LegalVersion.instrument_id == LegalInstrument.id)
+        # 内连接：没有原件的版本（原件被撤下后尚未重建）不参与检索
+        .join(SourceArtifact, LegalVersion.artifact_id == SourceArtifact.id)
+        .where(AuthorizationService.document_scope(principal))
+        .where(*filters)
+    )
+
+
+async def _single(session, principal, query, filters):
+    statement = _base_statement(principal, filters)
+    order_by: list = [LegalInstrument.title, LegalVersion.version_label, _ARTICLE_SORT]
+    if query.keyword:
+        # 关键词通路：方案由金标准选型（见 keyword.SELECTED），自带相关性排序，
+        # 放在稳定排序之前——命中的条文越短越聚焦。
+        strategy = keyword.selected()
+        statement = statement.where(strategy.match(query.keyword))
+        order_by = [*strategy.order(query.keyword), *order_by]
+    return await _run(session, statement.order_by(*order_by), query.limit)
+
+
+async def _keyword_arm(session, principal, query, filters):
+    """级联第一段：关键词（含查询改写），各变体结果**取并集**、按条款去重。
+
+    并集只可能提高召回——改写不替代原查询（见 ``rewrite.py``）。
+    """
+    strategy = keyword.selected()
+    merged: dict = {}
+    for variant in rewrite.rewrite(query.semantic).variants():
+        statement = (
+            _base_statement(principal, filters)
+            .where(strategy.match(variant))
+            .order_by(*strategy.order(variant), LegalInstrument.title, _ARTICLE_SORT)
+            .limit(query.limit + 1)
+        )
+        for row in (await session.execute(statement)).all():
+            merged.setdefault(row[0].id, row)
+        if len(merged) > query.limit:
+            break
+    rows = list(merged.values())[: query.limit + 1]
+    truncated = len(rows) > query.limit
+    return await _with_spans(session, rows[: query.limit], truncated)
+
+
+async def _vector_arm(session, principal, query, filters, query_vector):
+    statement = vector.statement(
+        model=get_settings().embedding_model,
+        query_vector=query_vector,
+        principal=principal,
+        limit=query.limit + 1,
+        filters=filters,
+    )
+    return await _run(session, statement, query.limit)
+
+
+async def _run(session, statement, limit):
+    rows = list((await session.execute(statement)).all())
+    truncated = len(rows) > limit
+    return await _with_spans(session, rows[:limit], truncated)
+
+
+async def _with_spans(session, rows, truncated):
+    spans = await _article_spans(session, [row[0] for row in rows])
+    return rows, truncated, spans
 
 
 async def _article_spans(

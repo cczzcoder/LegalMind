@@ -35,6 +35,14 @@ class SearchQuery(BaseModel):
         max_length=500,
         description="中文关键词；按选定方案匹配条款文本，可与精确字段和过滤条件叠加",
     )
+    semantic: str | None = Field(
+        default=None,
+        max_length=500,
+        description=(
+            "自然语言查询：先用关键词（含查询改写）在原文里找，无命中再用本地嵌入模型走向量兜底。"
+            "与 keyword 互斥"
+        ),
+    )
 
     # ---- 过滤 ----
     jurisdiction: str | None = Field(default=None, max_length=100)
@@ -117,3 +125,6 @@ class SearchResponse(BaseModel):
     hits: list[ProvisionHit]
     # 命中数超过 limit 时为真；本版不做总数统计（多一次 count 查询，暂无必要）
     truncated: bool
+    # 结果由哪条通路给出：exact（精确字段）/ keyword（关键词）/ vector（向量兜底）。
+    # 级联下调用方需要知道这次是原文命中还是语义兜底，否则无法解释结果为什么"看起来不相关"。
+    path: str = "exact"

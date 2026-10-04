@@ -7,9 +7,20 @@
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
+from sqlalchemy import select
 
+from app.adapters import embedding
 from app.adapters.storage import LocalFileStorage, get_storage
+from app.core.config import get_settings
 from app.core.security import Principal
+from app.models import (
+    LegalInstrument,
+    LegalVersion,
+    ProvisionEmbedding,
+    ProvisionIdentity,
+    ProvisionVersion,
+)
 from app.modules.parsing.service import parse_artifact
 from app.modules.retrieval.schemas import SearchQuery
 from app.modules.retrieval.service import search_provisions
@@ -467,6 +478,91 @@ async def test_keyword_with_no_match_returns_nothing(
             session, _principal(editor), SearchQuery(keyword="量子计算专利强制许可")
         )
     assert response.hits == []
+
+
+async def test_exact_search_reports_the_exact_path(
+    make_client, make_user, storage, session_factory
+):
+    name = law_name()
+    editor, _document_id = await _seed(
+        make_client, make_user, storage, session_factory, law_text(name), f"{name}.txt"
+    )
+    async with session_factory() as session:
+        response = await search_provisions(
+            session, _principal(editor), SearchQuery(instrument_title=name)
+        )
+    assert response.path == "exact"
+
+
+async def test_semantic_uses_the_keyword_path_when_the_text_matches(
+    make_client, make_user, storage, session_factory
+):
+    """级联第一段：关键词（含改写）能命中就用它——不白跑一次嵌入。"""
+    name = law_name()
+    marker = uuid4().hex[:8]
+    editor, _document_id = await _seed(
+        make_client, make_user, storage, session_factory, _marked_law(name, marker), f"{name}.txt"
+    )
+    async with session_factory() as session:
+        response = await search_provisions(
+            session, _principal(editor), SearchQuery(semantic=f"识别标记是{marker}")
+        )
+    assert response.path == "keyword"
+    assert (name, "1") in {(hit.instrument_title, hit.provision_number) for hit in response.hits}
+
+
+async def test_semantic_falls_back_to_the_vector_path(
+    monkeypatch, make_client, make_user, storage, session_factory
+):
+    """级联第二段：关键词无命中才走向量。
+
+    用固定向量顶替模型——测试里加载 2 GB 权重不合适；这里要验的是**级联的分支与口径**，
+    向量质量由金标准评测（`scripts/evaluate_retrieval.py`）负责。
+    """
+    name = law_name()
+    marker = uuid4().hex[:8]
+    editor, _document_id = await _seed(
+        make_client, make_user, storage, session_factory, _marked_law(name, marker), f"{name}.txt"
+    )
+    fixed = [0.1] * 1024
+    monkeypatch.setattr(embedding, "encode", lambda *_args, **_kwargs: [fixed])
+    async with session_factory() as session:
+        provision = await session.scalar(
+            select(ProvisionVersion)
+            .join(ProvisionIdentity, ProvisionVersion.provision_identity_id == ProvisionIdentity.id)
+            .join(LegalVersion, ProvisionVersion.legal_version_id == LegalVersion.id)
+            .join(LegalInstrument, LegalVersion.instrument_id == LegalInstrument.id)
+            .where(LegalInstrument.title == name)
+        )
+        session.add(
+            ProvisionEmbedding(
+                provision_version_id=provision.id,
+                model=get_settings().embedding_model,
+                dimensions=1024,
+                embedding=fixed,
+            )
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        response = await search_provisions(
+            session, _principal(editor), SearchQuery(semantic="一个原词都不出现的问法")
+        )
+    assert response.path == "vector"
+    assert (name, "1") in {(hit.instrument_title, hit.provision_number) for hit in response.hits}
+
+
+async def test_keyword_and_semantic_are_mutually_exclusive(
+    make_client, make_user, storage, session_factory
+):
+    """两条通路语义不同，同时给出来会让结果无法解释——直接拒掉，而不是猜。"""
+    editor = await make_user("reader")
+    async with session_factory() as session:
+        with pytest.raises(HTTPException) as caught:
+            await search_provisions(
+                session, _principal(editor), SearchQuery(keyword="甲", semantic="乙")
+            )
+    assert caught.value.status_code == 422
 
 
 async def test_keyword_combines_with_the_exact_title_filter(

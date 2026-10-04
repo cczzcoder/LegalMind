@@ -392,3 +392,97 @@ async def test_search_rejects_unknown_filter_values(
     assert bad_type.status_code == 422
     assert bad_status.status_code == 422
     assert bad_limit.status_code == 422
+
+
+def _marked_law(name: str, marker: str, *, spaced: bool = False) -> bytes:
+    """带唯一标记的条文：测试库里同类样板文本很多，不唯一就会把目标挤出 top-k。"""
+    phrase = f"识别标 记是{marker}" if spaced else f"识别标记是{marker}"
+    return (
+        f"{name}\n（2026年5月1日第十四届全国人民代表大会常务委员会第一次会议通过）\n"
+        f"第一条　{phrase}，为了测试，制定本法。\n"
+    ).encode()
+
+
+async def test_keyword_finds_the_provision_containing_the_phrase(
+    make_client, make_user, storage, session_factory
+):
+    name = law_name()
+    marker = uuid4().hex[:8]
+    editor, _document_id = await _seed(
+        make_client, make_user, storage, session_factory, _marked_law(name, marker), f"{name}.txt"
+    )
+    async with session_factory() as session:
+        response = await search_provisions(
+            session, _principal(editor), SearchQuery(keyword=f"识别标记是{marker}")
+        )
+    assert (name, "1") in {(hit.instrument_title, hit.provision_number) for hit in response.hits}
+
+
+async def test_keyword_ignores_whitespace_on_both_sides(
+    make_client, make_user, storage, session_factory
+):
+    """条款文本里会夹折行空格（PDF 尤其明显），查询侧同口径去空白后才匹配。"""
+    name = law_name()
+    marker = uuid4().hex[:8]
+    editor, _document_id = await _seed(
+        make_client,
+        make_user,
+        storage,
+        session_factory,
+        _marked_law(name, marker, spaced=True),
+        f"{name}.txt",
+    )
+    async with session_factory() as session:
+        response = await search_provisions(
+            session, _principal(editor), SearchQuery(keyword=f"识别标记是{marker}")
+        )
+    assert (name, "1") in {(hit.instrument_title, hit.provision_number) for hit in response.hits}
+
+
+async def test_keyword_requires_every_term_not_the_literal_phrase(
+    make_client, make_user, storage, session_factory
+):
+    """多词查询按 AND 处理：顺序无关，也不要求连在一起。"""
+    name = law_name()
+    marker = uuid4().hex[:8]
+    editor, _document_id = await _seed(
+        make_client, make_user, storage, session_factory, _marked_law(name, marker), f"{name}.txt"
+    )
+    async with session_factory() as session:
+        response = await search_provisions(
+            session, _principal(editor), SearchQuery(keyword=f"识别标记 {marker} 制定本法")
+        )
+    assert (name, "1") in {(hit.instrument_title, hit.provision_number) for hit in response.hits}
+
+
+async def test_keyword_with_no_match_returns_nothing(
+    make_client, make_user, storage, session_factory
+):
+    name = law_name()
+    editor, _document_id = await _seed(
+        make_client, make_user, storage, session_factory, law_text(name), f"{name}.txt"
+    )
+    async with session_factory() as session:
+        response = await search_provisions(
+            session, _principal(editor), SearchQuery(keyword="量子计算专利强制许可")
+        )
+    assert response.hits == []
+
+
+async def test_keyword_combines_with_the_exact_title_filter(
+    make_client, make_user, storage, session_factory
+):
+    """关键词与精确字段是叠加的 AND，不是二选一。"""
+    name = law_name()
+    other = law_name()
+    editor, _first = await _seed(
+        make_client, make_user, storage, session_factory, law_text(name), f"{name}.txt"
+    )
+    await _seed(make_client, make_user, storage, session_factory, law_text(other), f"{other}.txt")
+    async with session_factory() as session:
+        response = await search_provisions(
+            session,
+            _principal(editor),
+            SearchQuery(keyword="为了测试", instrument_title=name),
+        )
+    assert [hit.instrument_title for hit in response.hits] == [name]

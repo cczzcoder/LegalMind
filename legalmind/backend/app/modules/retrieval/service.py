@@ -1,4 +1,9 @@
-"""精确字段检索（设计 §8.2 的精确通路、§8.3）。
+"""精确字段检索与中文关键词检索（设计 §8.2 的精确/关键词通路、§8.3）。
+
+**精确字段**：名称、文号、稳定 ID、规范化条号的精确匹配。
+**关键词**（V1.11）：``query.keyword`` 走 ``keyword.selected()`` 选中的方案——金标准选型结果见
+``app/modules/retrieval/keyword.py``。两条通路都是**过滤条件**（与法域、类型、日期、效力、
+授权一起 AND），结果按关键词相关性再稳定排序；**RRF 融合与向量、图谱通路属 P4**，尚未实现。
 
 **授权在数据库里复核**（设计 §11.2、§8.3）：查询直接 join 到原件并套用
 ``AuthorizationService.document_scope``，不信任调用方提交的范围。受限原件（``restricted``）
@@ -37,6 +42,7 @@ from app.modules.legal_corpus.metadata import (
     normalize_title,
 )
 from app.modules.legal_corpus.structure import normalize_article_number
+from app.modules.retrieval import keyword
 from app.modules.retrieval.schemas import (
     CitationOut,
     ProvisionHit,
@@ -95,6 +101,14 @@ async def search_provisions(
                 return SearchResponse(hits=[], truncated=False)
             statement = statement.where(ProvisionIdentity.provision_number == normalized)
 
+        order_by: list = [LegalInstrument.title, LegalVersion.version_label, _ARTICLE_SORT]
+        if query.keyword:
+            # 关键词通路：方案由金标准选型（见 keyword.SELECTED），自带相关性排序，
+            # 放在稳定排序之前——命中的条文越短越聚焦。
+            strategy = keyword.selected()
+            statement = statement.where(strategy.match(query.keyword))
+            order_by = [*strategy.order(query.keyword), *order_by]
+
         if not query.include_not_yet_effective:
             statement = statement.where(LegalVersion.legal_status != NOT_YET_EFFECTIVE)
         if query.effective_on is not None:
@@ -112,7 +126,7 @@ async def search_provisions(
             statement = statement.where(LegalVersion.review_status.in_(query.review_statuses))
 
         statement = (
-            statement.order_by(LegalInstrument.title, LegalVersion.version_label, _ARTICLE_SORT)
+            statement.order_by(*order_by)
             # 多取一行用来判断是否被截断，省一次 count 查询
             .limit(query.limit + 1)
         )

@@ -1,9 +1,9 @@
 """检索输入与输出（设计 §8.1、§8.3、§13）。
 
-本版只实现 §8.3 的**精确字段与过滤**：名称 / 文号 / 稳定 ID / 规范化条号的精确匹配，加上法域、
-资料类型、效力日期、效力状态与授权过滤。§8.2 的关键词、向量与图谱通路尚未实现——§8.3 把中文关键词
-方案定为「经测试集选型后再接入」，在那之前不引入；因此这里也不接受 §8.1 的自然语言问题，
-「从问题里提取名称与条号」属于问答层（§8.2 第 2 步），不在本版范围。
+本版实现 §8.3 的**精确字段与过滤**，以及**中文关键词检索**（V1.11，方案经金标准选型，
+见 ``app/modules/retrieval/keyword.py``）。§8.2 的向量与图谱通路尚未实现；RRF 融合待多路齐备后
+再做。因此这里也不接受 §8.1 的自然语言问题，「从问题里提取名称与条号」属于问答层（§8.2 第 2 步），
+不在本版范围。
 """
 
 from datetime import date
@@ -29,6 +29,11 @@ class SearchQuery(BaseModel):
     stable_id: str | None = Field(default=None, max_length=200, description="外部权威稳定标识")
     article_number: str | None = Field(
         default=None, max_length=100, description="条号，接受「第八十七条」或「87」"
+    )
+    keyword: str | None = Field(
+        default=None,
+        max_length=500,
+        description="中文关键词；按选定方案匹配条款文本，可与精确字段和过滤条件叠加",
     )
 
     # ---- 过滤 ----

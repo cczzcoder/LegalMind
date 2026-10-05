@@ -39,6 +39,8 @@ class PageOut(BaseModel):
     id: UUID
     title: str
     head_revision: int
+    # 为 None 表示还没有审核发布的版本，读者看不到内容（设计 §10.2）
+    published_revision: int | None
     access_scope: AccessScope
     created_at: datetime
 
@@ -47,11 +49,30 @@ class SetAccessScope(BaseModel):
     access_scope: AccessScope
 
 
+class SetCitations(BaseModel):
+    """覆盖式登记引用；引用的是**具体条款版本**（设计 §5.3）。"""
+
+    provision_version_ids: list[UUID] = Field(max_length=500)
+
+
+class ReviewDecision(BaseModel):
+    """审核结论。``note`` 是驳回时给作者的理由，也是事后审计要看的东西。"""
+
+    note: str | None = Field(default=None, max_length=2000)
+
+
 class GrantOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     user_id: UUID
     granted_by: UUID
+    created_at: datetime
+
+
+class CitationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    provision_version_id: UUID
     created_at: datetime
 
 
@@ -64,4 +85,7 @@ class RevisionOut(BaseModel):
     body: str
     status: str
     author_id: UUID
+    reviewed_by: UUID | None
+    reviewed_at: datetime | None
+    review_note: str | None
     created_at: datetime

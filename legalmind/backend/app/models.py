@@ -40,6 +40,12 @@ class WikiPage(Base):
             "access_scope IN ('organization', 'restricted')",
             name="ck_wiki_page_access_scope",
         ),
+        # 发布指针只能指向本页已存在的修订（设计 §10.2）
+        CheckConstraint(
+            "published_revision IS NULL"
+            " OR (published_revision >= 1 AND published_revision <= head_revision)",
+            name="ck_wiki_page_published_within_head",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(
@@ -52,6 +58,8 @@ class WikiPage(Base):
     )
     title: Mapped[str] = mapped_column(String(200))
     head_revision: Mapped[int] = mapped_column(Integer)
+    # 审核通过后写入；为 NULL 表示还没有正式发布的版本，读者看不到内容（设计 §10.2）
+    published_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # organization：同组织有角色权限者可访问；restricted：还需 AccessGrant
     access_scope: Mapped[str] = mapped_column(
         String(20),
@@ -63,6 +71,11 @@ class WikiPage(Base):
         DateTime(timezone=True),
         server_default=func.now(),
     )
+
+
+# 修订状态机（设计 §10.2）：提交后锁定，审核通过才发布；驳回后可以改引用再提交，
+# 但改正文要新开修订。
+WIKI_REVISION_STATUSES = ("draft", "submitted", "published", "rejected")
 
 
 class WikiRevision(Base):
@@ -77,9 +90,11 @@ class WikiRevision(Base):
             "number > 0",
             name="ck_wiki_revision_positive",
         ),
+        # 状态取值来自 WIKI_REVISION_STATUSES；这里不能调 _in（它定义在本文件后面，
+        # 类体求值时还看不到），所以直接拼串——与旁边 ck_wiki_page_access_scope 同一写法
         CheckConstraint(
-            "status = 'draft'",
-            name="ck_wiki_draft_only",
+            "status IN ('" + "', '".join(WIKI_REVISION_STATUSES) + "')",
+            name="ck_wiki_revision_status",
         ),
     )
 
@@ -98,6 +113,43 @@ class WikiRevision(Base):
         default="draft",
     )
     author_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    # 审核痕迹（设计 §10.1 的「审核信息」）：谁、何时、以什么理由批的或驳的
+    reviewed_by: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+
+class WikiRevisionCitation(Base):
+    """修订引用的**具体条款版本**（设计 §5.3、§10.2）。
+
+    指向 ``provision_versions`` 而不是「某条法律的最新版」——原文更新后旧结论必须看起来就旧，
+    否则「有据可查」是假的。发布前逐条检查，读取时用它执行 §10.3 的权限继承。
+    """
+
+    __tablename__ = "wiki_revision_citations"
+    __table_args__ = (
+        UniqueConstraint("revision_id", "provision_version_id", name="uq_wiki_citation"),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        primary_key=True,
+        default=uuid4,
+    )
+    revision_id: Mapped[UUID] = mapped_column(
+        ForeignKey("wiki_revisions.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    provision_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("provision_versions.id", ondelete="RESTRICT"),
+        index=True,
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

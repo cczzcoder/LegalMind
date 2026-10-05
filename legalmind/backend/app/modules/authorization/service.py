@@ -10,7 +10,15 @@ from fastapi import Depends, HTTPException
 from sqlalchemy import ColumnElement, exists, or_, select
 
 from app.core.security import Principal, get_principal
-from app.models import AccessGrant, SourceArtifact, WikiPage
+from app.models import (
+    AccessGrant,
+    LegalVersion,
+    ProvisionVersion,
+    SourceArtifact,
+    WikiPage,
+    WikiRevision,
+    WikiRevisionCitation,
+)
 
 WIKI_READ = "wiki.read"
 WIKI_WRITE = "wiki.write"
@@ -22,6 +30,9 @@ DOCUMENT_DOWNLOAD = "document.download"
 DOCUMENT_WRITE = "document.write"
 DOCUMENT_GRANT = "document.grant"
 SOURCE_MANAGE = "source.manage"
+# 审核决定（通过 / 驳回 Wiki 修订）与查看审计记录（设计 §10.2、需求第 3 节）
+REVIEW_DECIDE = "review.decide"
+AUDIT_READ = "audit.read"
 
 _READER = {WIKI_READ, DOCUMENT_READ, DOCUMENT_DOWNLOAD}
 
@@ -29,12 +40,17 @@ _READER = {WIKI_READ, DOCUMENT_READ, DOCUMENT_DOWNLOAD}
 ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     "reader": frozenset(_READER),
     "editor": frozenset(_READER | {WIKI_WRITE, DOCUMENT_WRITE}),
-    "legal_reviewer": frozenset(_READER),
+    # 法律审核员：审核 Wiki 修订与资料版本（需求第 3 节）。**不给写权限**——审核与撰写分开，
+    # 否则「独立审核」无从谈起；作者也不能审自己的修订（服务层另有校验）。
+    "legal_reviewer": frozenset(_READER | {REVIEW_DECIDE}),
     "knowledge_admin": frozenset(
-        _READER | {WIKI_WRITE, WIKI_GRANT, DOCUMENT_WRITE, DOCUMENT_GRANT, SOURCE_MANAGE}
+        _READER
+        | {WIKI_WRITE, WIKI_GRANT, DOCUMENT_WRITE, DOCUMENT_GRANT, SOURCE_MANAGE, REVIEW_DECIDE}
     ),
     "system_admin": frozenset({USER_MANAGE}),
-    "auditor": frozenset(),
+    # 审计人员：查看审计与追溯记录（需求第 3 节）。只读，且**不含原件下载**——核对记录不等于
+    # 取走原件。
+    "auditor": frozenset({WIKI_READ, DOCUMENT_READ, AUDIT_READ}),
 }
 
 
@@ -59,9 +75,27 @@ class AuthorizationService:
                 AccessGrant.user_id == principal.user_id,
             )
         )
-        return (WikiPage.organization_id == principal.organization_id) & or_(
-            WikiPage.access_scope == "organization",
-            granted,
+        # §10.3 权限继承：页面引用了读者无权访问的原件时，整个页面不可见。
+        # 「不能因为内容被概括或改写就自动取消原文限制」——所以判据是**引用**，不是页面的
+        # access_scope。未发布的页面（published_revision 为 NULL）没有引用可查，由范围本身决定。
+        leaked = exists(
+            select(WikiRevisionCitation.id)
+            .join(WikiRevision, WikiRevisionCitation.revision_id == WikiRevision.id)
+            .join(
+                ProvisionVersion, WikiRevisionCitation.provision_version_id == ProvisionVersion.id
+            )
+            .join(LegalVersion, ProvisionVersion.legal_version_id == LegalVersion.id)
+            .join(SourceArtifact, LegalVersion.artifact_id == SourceArtifact.id)
+            .where(
+                WikiRevision.page_id == WikiPage.id,
+                WikiRevision.number == WikiPage.published_revision,
+                ~AuthorizationService.document_scope(principal),
+            )
+        )
+        return (
+            (WikiPage.organization_id == principal.organization_id)
+            & or_(WikiPage.access_scope == "organization", granted)
+            & ~leaked
         )
 
     @staticmethod

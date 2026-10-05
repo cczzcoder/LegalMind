@@ -353,10 +353,14 @@ async def test_instrument_type_filter(make_client, make_user, storage, session_f
 async def test_search_endpoint_requires_document_read(
     make_client, make_user, storage, session_factory
 ):
-    """走 HTTP 端点：reader 能检索，没有任何业务权限的 auditor 被拒。"""
+    """走 HTTP 端点：reader 能检索，没有 document.read 的 system_admin 被拒。
+
+    这里用 ``system_admin`` 而不是 ``auditor``——V1.15 起审计人员有了读资料权限（需求第 3 节），
+    而系统管理员按设计「不自动拥有业务内容权限」，正好是那个被拒的身份。
+    """
     name = law_name()
     reader = await make_user("reader")
-    auditor = await make_user("auditor")
+    denied_user = await make_user("system_admin")
     await _seed(make_client, make_user, storage, session_factory, law_text(name), f"{name}.txt")
 
     async with make_client() as client:
@@ -383,7 +387,7 @@ async def test_search_endpoint_requires_document_read(
     }
 
     async with make_client() as client:
-        await login(client, auditor.username)
+        await login(client, denied_user.username)
         denied = await client.post("/api/v1/search", json={"instrument_title": name})
 
     assert denied.status_code == 403

@@ -9,6 +9,7 @@ from app.core.database import get_session
 from app.core.security import Principal
 from app.models import WikiPage, WikiRevision
 from app.modules.authorization.service import (
+    REVIEW_DECIDE,
     WIKI_GRANT,
     WIKI_READ,
     WIKI_WRITE,
@@ -17,12 +18,15 @@ from app.modules.authorization.service import (
 )
 from app.modules.wiki import service
 from app.modules.wiki.schemas import (
+    CitationOut,
     CreatePage,
     CreateRevision,
     GrantOut,
     PageOut,
+    ReviewDecision,
     RevisionOut,
     SetAccessScope,
+    SetCitations,
 )
 
 router = APIRouter(prefix="/wiki", tags=["wiki"])
@@ -31,6 +35,7 @@ SessionDep = Annotated[AsyncSession, Depends(get_session)]
 ReaderDep = Annotated[Principal, Depends(require_permission(WIKI_READ))]
 WriterDep = Annotated[Principal, Depends(require_permission(WIKI_WRITE))]
 GrantorDep = Annotated[Principal, Depends(require_permission(WIKI_GRANT))]
+ReviewerDep = Annotated[Principal, Depends(require_permission(REVIEW_DECIDE))]
 
 
 @router.get("/pages", response_model=list[PageOut])
@@ -133,3 +138,81 @@ async def revoke(
     principal: GrantorDep,
 ):
     await service.revoke(session, principal, page_id, user_id)
+
+
+@router.put(
+    "/pages/{page_id}/revisions/{revision_number}/citations",
+    response_model=list[CitationOut],
+)
+async def set_citations(
+    page_id: UUID,
+    revision_number: int,
+    data: SetCitations,
+    session: SessionDep,
+    principal: WriterDep,
+):
+    """覆盖式登记修订引用的条款版本（设计 §5.3、§10.2）。"""
+    await service.set_citations(
+        session, principal, page_id, revision_number, data.provision_version_ids
+    )
+    return await service.list_citations(session, principal, page_id, revision_number)
+
+
+@router.get(
+    "/pages/{page_id}/revisions/{revision_number}/citations",
+    response_model=list[CitationOut],
+)
+async def list_citations(
+    page_id: UUID,
+    revision_number: int,
+    session: SessionDep,
+    principal: ReaderDep,
+):
+    return await service.list_citations(session, principal, page_id, revision_number)
+
+
+@router.post("/pages/{page_id}/revisions/{revision_number}/submit", response_model=RevisionOut)
+async def submit_revision(
+    page_id: UUID,
+    revision_number: int,
+    session: SessionDep,
+    principal: WriterDep,
+):
+    """提交审核；提交后该修订锁定，改正文要新开修订（设计 §10.2）。"""
+    return await service.submit_revision(session, principal, page_id, revision_number)
+
+
+@router.post("/pages/{page_id}/revisions/{revision_number}/publish", response_model=RevisionOut)
+async def publish_revision(
+    page_id: UUID,
+    revision_number: int,
+    data: ReviewDecision,
+    session: SessionDep,
+    principal: ReviewerDep,
+):
+    """审核通过并发布。需 ``review.decide``；**作者不能审自己的修订**；引用检查不通过不得发布。"""
+    return await service.publish_revision(session, principal, page_id, revision_number, data.note)
+
+
+@router.post("/pages/{page_id}/revisions/{revision_number}/reject", response_model=RevisionOut)
+async def reject_revision(
+    page_id: UUID,
+    revision_number: int,
+    data: ReviewDecision,
+    session: SessionDep,
+    principal: ReviewerDep,
+):
+    """驳回。作者可以改引用后重新提交，不必新开修订。"""
+    return await service.reject_revision(session, principal, page_id, revision_number, data.note)
+
+
+@router.get("/revisions/pending", response_model=list[RevisionOut])
+async def list_pending(session: SessionDep, principal: ReviewerDep):
+    """待审队列——此前只能靠 SQL 查。"""
+    return await service.list_pending(session, principal)
+
+
+@router.get("/pages/{page_id}/published", response_model=RevisionOut)
+async def get_published_revision(page_id: UUID, session: SessionDep, principal: ReaderDep):
+    """读者看到的是发布指针指向的修订，不是最新修订（设计 §10.2）。"""
+    return await service.get_published_revision(session, principal, page_id)

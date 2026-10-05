@@ -53,9 +53,10 @@ if not os.environ.get("DATABASE_URL"):
     )
     raise SystemExit(2)
 
-from sqlalchemy import Integer, func, select
+from sqlalchemy import Integer, func, select, tuple_
 from sqlalchemy import text as sql_text
 
+from app.adapters import embedding, reranker
 from app.core.database import SessionFactory
 from app.core.security import Principal
 from app.models import (
@@ -206,6 +207,46 @@ def _vector_retriever(model_name: str, query_vectors: dict[str, list[float]], ma
     )
 
 
+def _reranked_retriever(base: Retriever, model_name: str, *, depth: int) -> Retriever:
+    """在候选集上做**交叉编码器重排序**（设计 §8.2 的「重排序」）。
+
+    这是市面标准流水线里 RRF 之后的那一环。有了它，多路融合摊开的噪声才有东西收拾；
+    没有它，融合只能退成级联。把它加上，才能实测「RRF + 重排序」和级联谁更好。
+    """
+
+    async def search(session, principal, query: str, top_k: int) -> list[Pair]:
+        candidates = await base.search(session, principal, query, depth)
+        if len(candidates) <= 1:
+            return candidates[:top_k]
+        texts = await _texts(session, candidates)
+        scores = reranker.score(model_name, query, [texts.get(pair, "") for pair in candidates])
+        ordered = sorted(zip(candidates, scores, strict=True), key=lambda item: -item[1])
+        return [pair for pair, _score in ordered][:top_k]
+
+    return Retriever(
+        f"{base.name}+rerank",
+        f"重排序（{model_name}）+ {base.summary}",
+        search,
+    )
+
+
+async def _texts(session, pairs: list[Pair]) -> dict[Pair, str]:
+    """按 (法, 条) 批量取条文文本——重排序要看正文，而检索器只回传标识。"""
+    if not pairs:
+        return {}
+    statement = (
+        select(LegalInstrument.title, ProvisionIdentity.provision_number, ProvisionVersion.text)
+        .select_from(ProvisionVersion)
+        .join(ProvisionIdentity, ProvisionVersion.provision_identity_id == ProvisionIdentity.id)
+        .join(LegalVersion, ProvisionVersion.legal_version_id == LegalVersion.id)
+        .join(LegalInstrument, LegalVersion.instrument_id == LegalInstrument.id)
+        .where(tuple_(LegalInstrument.title, ProvisionIdentity.provision_number).in_(pairs))
+    )
+    return {
+        (title, number): text for title, number, text in (await session.execute(statement)).all()
+    }
+
+
 def _graph_retriever(
     strategy: Strategy, model_name: str, query_vectors: dict[str, list[float]], max_distance: float
 ) -> Retriever:
@@ -305,6 +346,7 @@ def _build_retrievers(
     rrf_k: int,
     depth: int,
     rewrite_layers: list[str],
+    rerank_model: str | None,
 ) -> tuple[list[Retriever], dict[str, dict[str, list[float]]]]:
     """按 ``paths`` 组装要跑的检索器；向量查询向量按模型预计算一次，避免每条查询重复编码。"""
     retrievers: list[Retriever] = []
@@ -350,6 +392,10 @@ def _build_retrievers(
                     keyword.selected(), model_name, query_vectors[model_name], max_distance
                 )
             )
+    if rerank_model:
+        # 重排序只作用于多路融合的结果——给 hybrid 与 cascade 各包一层，正面比
+        wrapped = [item for item in retrievers if item.name.startswith(("hybrid:", "cascade:"))]
+        retrievers += [_reranked_retriever(item, rerank_model, depth=depth) for item in wrapped]
     return retrievers, query_vectors
 
 
@@ -482,12 +528,16 @@ async def run(args) -> int:
     models = [item.strip() for item in args.models.split(",") if item.strip()]
     rewrite_layers = [item.strip() for item in args.rewrite.split(",") if item.strip()]
     retrievers, query_vectors = _build_retrievers(
-        paths, models, args.max_distance, args.rrf_k, args.depth, rewrite_layers
+        paths,
+        models,
+        args.max_distance,
+        args.rrf_k,
+        args.depth,
+        rewrite_layers,
+        args.rerank or None,
     )
     queries = _load_queries(Path(args.dataset))
     if query_vectors:
-        from app.adapters import embedding
-
         texts = [item["query"] for item in queries]
         for model_name, cache in query_vectors.items():
             print(f"编码 {len(texts)} 条查询向量：{model_name} …")
@@ -503,6 +553,7 @@ async def run(args) -> int:
         "paths": paths,
         "models": models,
         "rewrite": rewrite_layers,
+        "rerank": args.rerank or None,
         "summary": summaries,
         "details": details,
     }
@@ -540,6 +591,11 @@ def main() -> int:
     parser.add_argument("--rrf-k", type=int, default=60)
     parser.add_argument("--depth", type=int, default=50, help="融合时每路先取多少条")
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument(
+        "--rerank",
+        default="",
+        help="交叉编码器重排序的模型名（留空则不重排）；会为 hybrid 与 cascade 各加一个 +rerank 变体",
+    )
     parser.add_argument(
         "--rewrite",
         default="",

@@ -11,12 +11,11 @@
 所以这里按已知文件布局直接拉，缺哪个跳过哪个。
 """
 
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+from app.adapters import hf_mirror
 from app.core.config import get_settings
 
 # 各仓库共有的文件；不在仓库里的会被 404 跳过
@@ -67,71 +66,22 @@ def model_dir(name: str) -> Path:
     return Path(get_settings().embedding_model_dir).expanduser() / name.replace("/", "__")
 
 
-def _fetch(url: str, destination: Path, *, label: str = "") -> int:
-    """下到 ``<name>.part`` 再改名——中途断了不会留下一个"看起来完整"的半截权重。
-
-    每 100 MB 打一次进度：本机到镜像只有 ~0.6 MB/s，BGE-M3 要下 2.2 GB，没有进度会以为卡死。
-    """
-    partial = destination.with_name(destination.name + ".part")
-    partial.parent.mkdir(parents=True, exist_ok=True)  # 仓库里有 1_Pooling/ 这类嵌套目录
-    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    total = 0
-    mark = 0
-    try:
-        with (
-            urllib.request.urlopen(request, timeout=60) as response,
-            partial.open("wb") as handle,
-        ):
-            while True:
-                chunk = response.read(1 << 20)
-                if not chunk:
-                    break
-                handle.write(chunk)
-                total += len(chunk)
-                if label and total - mark >= 100 * 1024 * 1024:
-                    mark = total
-                    print(f"    … {label} {total / 1048576:.0f} MB", flush=True)
-    except BaseException:
-        partial.unlink(missing_ok=True)
-        raise
-    partial.replace(destination)
-    return total
-
-
 def download(name: str, *, force: bool = False) -> Path:
     """把模型文件下到 ``model_dir(name)``，返回该目录（可被 ``SentenceTransformer`` 直接加载）。"""
     spec = model(name)
     directory = model_dir(name)
-    directory.mkdir(parents=True, exist_ok=True)
-    base = f"{get_settings().hf_endpoint.rstrip('/')}/{spec.name}/resolve/main"
-    downloaded: list[str] = []
-    for filename in _SHARED_FILES:
-        target = directory / filename
-        if target.is_file() and target.stat().st_size > 0 and not force:
-            continue
-        try:
-            size = _fetch(f"{base}/{filename}", target, label=filename)
-        except urllib.error.HTTPError as error:
-            if error.code == 404:
-                continue
-            raise
-        downloaded.append(f"{filename} ({size / 1048576:.1f} MB)")
-        print(f"  + {filename} ({size / 1048576:.1f} MB)", flush=True)
+    downloaded = hf_mirror.download_repo(
+        spec.name,
+        directory,
+        _SHARED_FILES,
+        endpoint=get_settings().hf_endpoint,
+        weights=_WEIGHT_FILES,
+        force=force,
+    )
     if not (directory / "config.json").is_file():
-        raise RuntimeError(f"{spec.name} 的 config.json 没下下来，检查 {base}")
-
-    weights = [name_ for name_ in _WEIGHT_FILES if (directory / name_).is_file()]
-    if not weights:
-        for filename in _WEIGHT_FILES:
-            try:
-                size = _fetch(f"{base}/{filename}", directory / filename, label=filename)
-            except urllib.error.HTTPError as error:
-                if error.code == 404:
-                    continue
-                raise
-            downloaded.append(f"{filename} ({size / 1048576:.1f} MB)")
-            print(f"  + {filename} ({size / 1048576:.1f} MB)", flush=True)
-            break
+        raise RuntimeError(
+            f"{spec.name} 的 config.json 没下下来，检查 {get_settings().hf_endpoint}"
+        )
     print(f"模型就绪：{directory}（本次下载 {len(downloaded)} 个文件）", flush=True)
     return directory
 

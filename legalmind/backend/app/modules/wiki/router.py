@@ -55,6 +55,29 @@ async def list_pages(
     return list(result)
 
 
+@router.get("/pages/stale", response_model=list[PageOut])
+async def list_stale_pages(
+    session: SessionDep,
+    principal: ReviewerDep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+):
+    """待复核的已发布页面（设计 §10.2「来源更新先标记待复核」）。
+
+    标记由 ``python -m app.cli flag-stale-pages`` 计算并写入；这里只读。
+    """
+    return list(
+        await session.scalars(
+            select(WikiPage)
+            .where(
+                AuthorizationService.wiki_page_scope(principal),
+                WikiPage.review_due_at.is_not(None),
+            )
+            .order_by(WikiPage.review_due_at.desc(), WikiPage.id)
+            .limit(limit)
+        )
+    )
+
+
 @router.post("/pages", response_model=RevisionOut, status_code=201)
 async def create_page(
     data: CreatePage,

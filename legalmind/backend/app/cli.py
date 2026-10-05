@@ -11,6 +11,7 @@
     python -m app.cli withdraw-document --as kadmin --from-source <来源 id> --reason 原因 [--dry-run]
     python -m app.cli relink-versions --as kadmin [--instrument <本体 id>...] [--dry-run]
     python -m app.cli extract-citations --as editor1 [--dry-run]   # 条文引用抽成 cite 边
+    python -m app.cli flag-stale-pages --as reviewer1 [--dry-run]  # 标记依据已失效的已发布页面
     python -m app.cli run-worker [--once]        # 按需启动后台 worker（解析等）
 密码从终端交互输入，不经命令行参数传递，避免进入 shell 历史。
 """
@@ -49,6 +50,7 @@ from app.models import (
 )
 from app.modules.authorization.service import (
     DOCUMENT_WRITE,
+    REVIEW_DECIDE,
     SOURCE_MANAGE,
     AuthorizationService,
 )
@@ -60,6 +62,7 @@ from app.modules.legal_corpus import graph as legal_corpus_graph
 from app.modules.legal_corpus import relink as legal_corpus_relink
 from app.modules.sources import service as sources_service
 from app.modules.sources.schemas import CreateSource, UpdateSource
+from app.modules.wiki import staleness as wiki_staleness
 from app.workers import runner as worker_runner
 
 
@@ -166,6 +169,34 @@ async def withdraw_documents_command(
     print(f"  仍无原件而删除的版本：{list(report.remove_versions) or '无'}")
     print(f"  随之删除的法律本体：{list(report.remove_instruments) or '无'}")
     print(f"  用这些原件重建版本树：{list(report.relink_from) or '无'}")
+    if dry_run:
+        print("  这是预演，未改动任何数据；确认后去掉 --dry-run 再执行。")
+
+
+async def flag_stale_pages_command(username: str, dry_run: bool) -> None:
+    """标记依据已失效的已发布 Wiki 页面（设计 §10.2）；需 review.decide，操作写审计。
+
+    只看**发布指针指向的**那版修订。两条信号：引用的法律版本被取代（`legal_status` 变
+    `repealed`）、或引用条款正文与发布时的快照不一致。**只标记，不动正文**——历史说明按 §10.2
+    保留，由人决定怎么改。
+    """
+    async with SessionFactory() as session:
+        try:
+            async with session.begin():
+                principal = await cli_principal(session, username, REVIEW_DECIDE)
+            report = await wiki_staleness.flag_stale(session, principal, dry_run=dry_run)
+        except HTTPException as error:
+            sys.exit(f"{error.status_code}: {error.detail}")
+        finally:
+            await engine.dispose()
+
+    verb = "将标记" if dry_run else "已标记"
+    print(
+        f"检查 {report.published} 个已发布页面，发现 {report.stale} 个待复核："
+        f"{verb} {report.newly_flagged} 个，清除 {report.cleared} 个。"
+    )
+    for finding in report.findings:
+        print(f"  - {finding.title}（第 {finding.revision_number} 版）：{finding.reason}")
     if dry_run:
         print("  这是预演，未改动任何数据；确认后去掉 --dry-run 再执行。")
 
@@ -672,6 +703,13 @@ def main() -> None:
     citations.add_argument("--as", dest="actor", required=True, help="执行操作的用户名")
     citations.add_argument("--dry-run", action="store_true", help="只输出将写入的边数，不改动数据")
 
+    stale = commands.add_parser(
+        "flag-stale-pages",
+        help="标记依据已失效的已发布 Wiki 页面（设计 §10.2；需 review.decide，操作写审计）",
+    )
+    stale.add_argument("--as", dest="actor", required=True, help="执行操作的用户名")
+    stale.add_argument("--dry-run", action="store_true", help="只输出将标记的页面，不改动数据")
+
     worker = commands.add_parser(
         "run-worker", help="按需启动单进程 worker，领取并处理后台任务（设计 12.2）"
     )
@@ -766,6 +804,10 @@ def main() -> None:
 
     if args.command == "relink-versions":
         asyncio.run(relink_versions_command(args.actor, args.instrument, args.dry_run))
+        return
+
+    if args.command == "flag-stale-pages":
+        asyncio.run(flag_stale_pages_command(args.actor, args.dry_run))
         return
 
     if args.command == "extract-citations":

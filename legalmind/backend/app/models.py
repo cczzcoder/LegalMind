@@ -60,6 +60,10 @@ class WikiPage(Base):
     head_revision: Mapped[int] = mapped_column(Integer)
     # 审核通过后写入；为 NULL 表示还没有正式发布的版本，读者看不到内容（设计 §10.2）
     published_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 待复核标记：引用的依据被取代或正文变了（§10.2「来源更新先标记待复核」）。
+    # 只标记、不动正文——历史说明保留，由人决定怎么改。
+    review_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    review_due_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     # organization：同组织有角色权限者可访问；restricted：还需 AccessGrant
     access_scope: Mapped[str] = mapped_column(
         String(20),
@@ -150,6 +154,9 @@ class WikiRevisionCitation(Base):
         ForeignKey("provision_versions.id", ondelete="RESTRICT"),
         index=True,
     )
+    # **发布时**引用条款的正文哈希（§10.2）。之后同一版本被重新解析、或换了更优原件后重建过
+    # 条款文本，哈希就对不上——「审核当时看到的是这段文字」要能验证，不能只靠版本号。
+    provision_text_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

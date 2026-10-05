@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import Principal
@@ -371,6 +371,22 @@ async def publish_revision(
         revision.reviewed_at = datetime.now(UTC)
         revision.review_note = note
         page.published_revision = revision.number
+        # 记下「审核当时看到的是哪段文字」（§10.2）——之后同一版本被重新解析、或换了更优原件
+        # 重建过条款文本，就要能发现；只比对版本号发现不了正文变化
+        await session.execute(
+            update(WikiRevisionCitation)
+            .where(WikiRevisionCitation.revision_id == revision.id)
+            .values(
+                provision_text_sha256=(
+                    select(ProvisionVersion.text_sha256)
+                    .where(ProvisionVersion.id == WikiRevisionCitation.provision_version_id)
+                    .scalar_subquery()
+                )
+            )
+        )
+        # 重新发布本身就是又复核过一遍，待复核标记随之清掉（§10.2）
+        page.review_due_at = None
+        page.review_due_reason = None
         record_event(
             session,
             principal,

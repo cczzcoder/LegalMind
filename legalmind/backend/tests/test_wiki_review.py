@@ -8,19 +8,22 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from app.adapters.storage import LocalFileStorage, get_storage
 from app.core.security import Principal, hash_password
 from app.models import (
+    AuditEvent,
     LegalInstrument,
     LegalVersion,
     ProvisionIdentity,
     ProvisionVersion,
     SourceArtifact,
     User,
+    WikiPage,
     WikiRevision,
+    WikiRevisionCitation,
 )
 from app.modules.authorization.service import (
     AUDIT_READ,
@@ -30,7 +33,7 @@ from app.modules.authorization.service import (
 )
 from app.modules.authorization.service import AuthorizationService as Auth
 from app.modules.parsing.service import parse_artifact
-from app.modules.wiki import service
+from app.modules.wiki import service, staleness
 from app.modules.wiki.schemas import CreatePage, CreateRevision
 from tests.helpers import PASSWORD, import_document_for_parsing
 
@@ -310,3 +313,169 @@ def test_review_and_audit_permissions_are_assigned():
     assert not Auth.can(auditor, DOCUMENT_DOWNLOAD)
     assert not Auth.can(auditor, WIKI_WRITE)
     assert not Auth.can(reviewer, WIKI_WRITE)
+
+
+async def _published_page(session_factory, make_client, make_user, storage, actors) -> tuple:
+    """发布一个引用了真实条款的页面，返回 (page_id, provision_version_id, author, reviewer)。"""
+    author = await actors("editor")
+    reviewer = await actors("legal_reviewer")
+    page_id, number = await _draft(session_factory, author)
+    provision = await _provision(session_factory, make_client, make_user, storage)
+    await _submit_with_citation(session_factory, author, page_id, number, provision)
+    await _publish(session_factory, reviewer, page_id, number)
+    return page_id, provision, author, reviewer
+
+
+async def _flag(session_factory, reviewer, *, dry_run=False):
+    async with session_factory() as session:
+        return await staleness.flag_stale(session, reviewer, dry_run=dry_run)
+
+
+async def _rewrite_provision_text(session_factory, provision: UUID) -> None:
+    """模拟「同一版本被重新解析、或换了更优原件后重建条款文本」。"""
+    async with session_factory() as session, session.begin():
+        row = await session.scalar(select(ProvisionVersion).where(ProvisionVersion.id == provision))
+        row.text = "第一条　测试条文（重新解析后改了字）。"
+        row.text_sha256 = "f" * 64
+
+
+async def _review_due(session_factory, page_id: UUID):
+    async with session_factory() as session:
+        page = await session.scalar(select(WikiPage).where(WikiPage.id == page_id))
+    return page.review_due_at, page.review_due_reason
+
+
+def _findings_for(report, page_id: UUID) -> list:
+    """只看**自己那一页**的结论。
+
+    测试库是共享且跨运行累积的，`flag_stale` 又会扫全库——拿全局计数做断言必然被别的用例污染。
+    """
+    return [item for item in report.findings if item.page_id == page_id]
+
+
+async def test_publishing_snapshots_the_cited_text_hash(
+    make_client, make_user, actors, storage, session_factory
+):
+    """§10.2：要能判断「来源更新了」，得先记住审核当时看到的是哪段文字。"""
+    _page_id, provision, _author, _reviewer = await _published_page(
+        session_factory, make_client, make_user, storage, actors
+    )
+    async with session_factory() as session:
+        snapshot = await session.scalar(
+            select(WikiRevisionCitation.provision_text_sha256)
+            .join(WikiRevision, WikiRevisionCitation.revision_id == WikiRevision.id)
+            .where(WikiRevisionCitation.provision_version_id == provision)
+        )
+    assert snapshot is not None and snapshot != "f" * 64
+
+
+async def test_changed_provision_text_marks_the_page_for_review(
+    make_client, make_user, actors, storage, session_factory
+):
+    """正文变了就标记——**只标记，不动正文**（§10.2 保留历史说明）。"""
+    page_id, provision, _author, reviewer = await _published_page(
+        session_factory, make_client, make_user, storage, actors
+    )
+    assert (await _review_due(session_factory, page_id))[0] is None
+
+    await _rewrite_provision_text(session_factory, provision)
+
+    report = await _flag(session_factory, reviewer)
+    mine = _findings_for(report, page_id)
+    assert len(mine) == 1
+    assert "正文已变更" in mine[0].reason
+
+    due_at, reason = await _review_due(session_factory, page_id)
+    assert due_at is not None and "正文已变更" in reason
+    # 正文一个字都没改
+    async with session_factory() as session:
+        revision = await session.scalar(
+            select(WikiRevision).where(WikiRevision.page_id == page_id, WikiRevision.number == 1)
+        )
+    assert revision.body == "初稿正文"
+
+
+async def test_superseded_legal_version_marks_the_page_for_review(
+    make_client, make_user, actors, storage, session_factory
+):
+    """引用的法律版本被取代（`legal_status` 变 repealed）就标记——这是落库时算出的事实。"""
+    page_id, provision, _author, reviewer = await _published_page(
+        session_factory, make_client, make_user, storage, actors
+    )
+    async with session_factory() as session, session.begin():
+        version = await session.scalar(
+            select(LegalVersion)
+            .join(ProvisionVersion, ProvisionVersion.legal_version_id == LegalVersion.id)
+            .where(ProvisionVersion.id == provision)
+        )
+        version.legal_status = "repealed"
+
+    report = await _flag(session_factory, reviewer)
+    mine = _findings_for(report, page_id)
+    assert len(mine) == 1
+    assert "已被取代" in mine[0].reason
+
+
+async def test_republishing_clears_the_review_mark(
+    make_client, make_user, actors, storage, session_factory
+):
+    """重新发布本身就是又复核过一遍，标记随之清掉（§10.2）。"""
+    page_id, provision, author, reviewer = await _published_page(
+        session_factory, make_client, make_user, storage, actors
+    )
+    await _rewrite_provision_text(session_factory, provision)
+    await _flag(session_factory, reviewer)
+    assert (await _review_due(session_factory, page_id))[0] is not None
+
+    async with session_factory() as session:
+        await service.create_revision(
+            session, author, page_id, CreateRevision(expected_revision=1, body="复核后重写")
+        )
+    await _submit_with_citation(session_factory, author, page_id, 2, provision)
+    await _publish(session_factory, reviewer, page_id, 2)
+
+    due_at, reason = await _review_due(session_factory, page_id)
+    assert due_at is None and reason is None
+
+
+async def _review_due_events(session_factory, page_id: UUID) -> int:
+    async with session_factory() as session:
+        return await session.scalar(
+            select(func.count())
+            .select_from(AuditEvent)
+            .where(
+                AuditEvent.action == "wiki.page.review_due",
+                AuditEvent.resource_id == page_id,
+            )
+        )
+
+
+async def test_flag_stale_is_idempotent_and_audits_only_on_change(
+    make_client, make_user, actors, storage, session_factory
+):
+    """例行扫描每次都写审计会把日志淹掉——只在状态变化时写。"""
+    page_id, provision, _author, reviewer = await _published_page(
+        session_factory, make_client, make_user, storage, actors
+    )
+    await _rewrite_provision_text(session_factory, provision)
+
+    await _flag(session_factory, reviewer)
+    first = await _review_due_events(session_factory, page_id)
+    assert first == 1
+
+    await _flag(session_factory, reviewer)
+    assert await _review_due_events(session_factory, page_id) == first
+
+
+async def test_flag_stale_dry_run_changes_nothing(
+    make_client, make_user, actors, storage, session_factory
+):
+    page_id, provision, _author, reviewer = await _published_page(
+        session_factory, make_client, make_user, storage, actors
+    )
+    await _rewrite_provision_text(session_factory, provision)
+
+    report = await _flag(session_factory, reviewer, dry_run=True)
+    assert len(_findings_for(report, page_id)) == 1
+    assert (await _review_due(session_factory, page_id))[0] is None
+    assert await _review_due_events(session_factory, page_id) == 0

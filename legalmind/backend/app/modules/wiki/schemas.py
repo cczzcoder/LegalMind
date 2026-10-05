@@ -41,6 +41,9 @@ class PageOut(BaseModel):
     head_revision: int
     # 为 None 表示还没有审核发布的版本，读者看不到内容（设计 §10.2）
     published_revision: int | None
+    # 待复核标记：引用的依据被取代或正文变了（§10.2「来源更新先标记待复核」）
+    review_due_at: datetime | None
+    review_due_reason: str | None
     access_scope: AccessScope
     created_at: datetime
 

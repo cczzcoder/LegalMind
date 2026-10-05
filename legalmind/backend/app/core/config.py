@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     # 检索用的嵌入模型。金标准选型结论见 doc/技术决策与踩坑记录.md §1.5：BGE-M3 召回 1.000、
     # text2vec 0.917，故选 BGE-M3。
     embedding_model: str = "BAAI/bge-m3"
+    # 生成模型（P6）。**只用本地部署的量化权重**——设计 §9.5 的决策是「因合规要求，P6 架构锁定为
+    # 本地部署模型，默认关闭任何外部 API 接口」，所以这里没有、也不该有外部服务的配置项。
+    generation_model: str = "Qwen2.5-7B-Instruct-GGUF"
     # 模型权重下载源。本机 HuggingFace 直连不通，默认走镜像（其元数据 API 403 不影响下载）。
     hf_endpoint: str = "https://hf-mirror.com"
 

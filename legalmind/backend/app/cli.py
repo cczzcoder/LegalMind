@@ -12,6 +12,7 @@
     python -m app.cli relink-versions --as kadmin [--instrument <本体 id>...] [--dry-run]
     python -m app.cli extract-citations --as editor1 [--dry-run]   # 条文引用抽成 cite 边
     python -m app.cli flag-stale-pages --as reviewer1 [--dry-run]  # 标记依据已失效的已发布页面
+    python -m app.cli ask --as reader1 --question "单位欠缴社保费会被怎么处理？"  # 本地模型的问答
     python -m app.cli run-worker [--once]        # 按需启动后台 worker（解析等）
 密码从终端交互输入，不经命令行参数传递，避免进入 shell 历史。
 """
@@ -48,7 +49,9 @@ from app.models import (
     User,
     UserRole,
 )
+from app.modules.answering import service as answering_service
 from app.modules.authorization.service import (
+    DOCUMENT_READ,
     DOCUMENT_WRITE,
     REVIEW_DECIDE,
     SOURCE_MANAGE,
@@ -171,6 +174,45 @@ async def withdraw_documents_command(
     print(f"  用这些原件重建版本树：{list(report.relink_from) or '无'}")
     if dry_run:
         print("  这是预演，未改动任何数据；确认后去掉 --dry-run 再执行。")
+
+
+async def ask_command(
+    username: str, question: str, limit: int, max_new_tokens: int, model: str | None
+) -> None:
+    """最小可用的证据约束问答（设计 §9；P6 的第一刀）；需 document.read。
+
+    **只用本地生成模型**——§9.5 的决策锁定本地部署、默认关闭任何外部 API 接口。
+    检索一条都没命中时不调用模型，直接返回「依据不足」。
+    """
+    async with SessionFactory() as session:
+        try:
+            async with session.begin():
+                principal = await cli_principal(session, username, DOCUMENT_READ)
+            answer = await answering_service.answer_question(
+                session,
+                principal,
+                question,
+                limit=limit,
+                max_new_tokens=max_new_tokens,
+                model=model,
+            )
+        except HTTPException as error:
+            sys.exit(f"{error.status_code}: {error.detail}")
+        finally:
+            await engine.dispose()
+
+    print(f"问题：{answer.question}")
+    print(f"检索通路：{answer.path}　依据 {len(answer.citations)} 条　耗时 {answer.seconds:.1f}s")
+    print()
+    print(answer.answer)
+    if answer.citations:
+        print()
+        print("依据：")
+        for index, citation in enumerate(answer.citations, start=1):
+            print(
+                f"  [{index}] {citation.instrument_title} {citation.provision_display}"
+                f"（效力状态：{citation.legal_status}，版本 {citation.provision_version_id}）"
+            )
 
 
 async def flag_stale_pages_command(username: str, dry_run: bool) -> None:
@@ -710,6 +752,16 @@ def main() -> None:
     stale.add_argument("--as", dest="actor", required=True, help="执行操作的用户名")
     stale.add_argument("--dry-run", action="store_true", help="只输出将标记的页面，不改动数据")
 
+    ask = commands.add_parser(
+        "ask",
+        help="证据约束问答（设计 §9；本地生成模型，需 document.read）",
+    )
+    ask.add_argument("--as", dest="actor", required=True, help="执行操作的用户名")
+    ask.add_argument("--question", required=True, help="要问的问题")
+    ask.add_argument("--limit", type=int, default=5, help="取多少条依据（默认 5）")
+    ask.add_argument("--max-new-tokens", type=int, default=512, help="最多生成多少 token")
+    ask.add_argument("--model", default=None, help="覆盖生成模型（默认取配置里的）")
+
     worker = commands.add_parser(
         "run-worker", help="按需启动单进程 worker，领取并处理后台任务（设计 12.2）"
     )
@@ -804,6 +856,12 @@ def main() -> None:
 
     if args.command == "relink-versions":
         asyncio.run(relink_versions_command(args.actor, args.instrument, args.dry_run))
+        return
+
+    if args.command == "ask":
+        asyncio.run(
+            ask_command(args.actor, args.question, args.limit, args.max_new_tokens, args.model)
+        )
         return
 
     if args.command == "flag-stale-pages":

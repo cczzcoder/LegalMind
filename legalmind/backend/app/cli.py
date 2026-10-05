@@ -10,6 +10,7 @@
     python -m app.cli withdraw-document --as kadmin --document <id> [--document <id>...] --reason 原因 [--dry-run]
     python -m app.cli withdraw-document --as kadmin --from-source <来源 id> --reason 原因 [--dry-run]
     python -m app.cli relink-versions --as kadmin [--instrument <本体 id>...] [--dry-run]
+    python -m app.cli extract-citations --as editor1 [--dry-run]   # 条文引用抽成 cite 边
     python -m app.cli run-worker [--once]        # 按需启动后台 worker（解析等）
 密码从终端交互输入，不经命令行参数传递，避免进入 shell 历史。
 """
@@ -55,6 +56,7 @@ from app.modules.documents import service as documents_service
 from app.modules.documents import withdrawal as documents_withdrawal
 from app.modules.identity import mfa, service
 from app.modules.identity.schemas import CreateUser
+from app.modules.legal_corpus import graph as legal_corpus_graph
 from app.modules.legal_corpus import relink as legal_corpus_relink
 from app.modules.sources import service as sources_service
 from app.modules.sources.schemas import CreateSource, UpdateSource
@@ -164,6 +166,34 @@ async def withdraw_documents_command(
     print(f"  仍无原件而删除的版本：{list(report.remove_versions) or '无'}")
     print(f"  随之删除的法律本体：{list(report.remove_instruments) or '无'}")
     print(f"  用这些原件重建版本树：{list(report.relink_from) or '无'}")
+    if dry_run:
+        print("  这是预演，未改动任何数据；确认后去掉 --dry-run 再执行。")
+
+
+async def extract_citations_command(username: str, dry_run: bool) -> None:
+    """把条文里的引用抽成 ``cite`` 边（设计 §8.4）；需 document.write，操作写审计。
+
+    引用是**正则从正文抽的文本事实**（条文自己写着「本法第八十七条」），不是模型联想出来的边；
+    目标条款不在库里的引用直接丢弃并计数，不猜。
+    """
+    async with SessionFactory() as session:
+        try:
+            async with session.begin():
+                principal = await cli_principal(session, username, DOCUMENT_WRITE)
+            report = await legal_corpus_graph.link_citations(session, principal, dry_run=dry_run)
+        except HTTPException as error:
+            sys.exit(f"{error.status_code}: {error.detail}")
+        finally:
+            await engine.dispose()
+
+    verb = "将写入" if dry_run else "已写入"
+    print(
+        f"扫描 {report.provisions} 条条款，抽到 {report.extracted} 处引用，"
+        f"{verb} {report.linked} 条边。"
+    )
+    print(f"未解析 {report.unresolved} 处（目标条款不在库里，已丢弃）：")
+    for sample in report.unresolved_samples:
+        print(f"  - {sample}")
     if dry_run:
         print("  这是预演，未改动任何数据；确认后去掉 --dry-run 再执行。")
 
@@ -635,6 +665,13 @@ def main() -> None:
     )
     relink.add_argument("--dry-run", action="store_true", help="只输出将发生的变化，不改动数据")
 
+    citations = commands.add_parser(
+        "extract-citations",
+        help="把条文里的引用抽成 cite 边（设计 §8.4；需 document.write，操作写审计）",
+    )
+    citations.add_argument("--as", dest="actor", required=True, help="执行操作的用户名")
+    citations.add_argument("--dry-run", action="store_true", help="只输出将写入的边数，不改动数据")
+
     worker = commands.add_parser(
         "run-worker", help="按需启动单进程 worker，领取并处理后台任务（设计 12.2）"
     )
@@ -729,6 +766,10 @@ def main() -> None:
 
     if args.command == "relink-versions":
         asyncio.run(relink_versions_command(args.actor, args.instrument, args.dry_run))
+        return
+
+    if args.command == "extract-citations":
+        asyncio.run(extract_citations_command(args.actor, args.dry_run))
         return
 
     password = getpass.getpass("Password (min 12 chars): ")

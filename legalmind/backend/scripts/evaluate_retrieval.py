@@ -66,7 +66,7 @@ from app.models import (
     SourceArtifact,
 )
 from app.modules.authorization.service import AuthorizationService
-from app.modules.retrieval import keyword, rewrite, vector
+from app.modules.retrieval import graph, keyword, rewrite, vector
 from app.modules.retrieval.keyword import STRATEGIES, Strategy
 
 _ARTICLE_SORT = func.regexp_replace(ProvisionIdentity.provision_number, "[^0-9].*$", "", "g").cast(
@@ -110,16 +110,35 @@ def _dedupe(pairs: list[Pair], top_k: int) -> list[Pair]:
 
 def _keyword_retriever(strategy: Strategy) -> Retriever:
     async def search(session, principal, query: str, top_k: int) -> list[Pair]:
-        return await _keyword_hits(session, principal, strategy, query, top_k)
+        rows = await _keyword_rows(session, principal, strategy, query, top_k * 3)
+        return _pairs(_unique(rows, top_k))
 
     return Retriever(f"keyword:{strategy.name}", strategy.summary, search)
 
 
-async def _keyword_hits(
-    session, principal: Principal, strategy: Strategy, query: str, top_k: int
-) -> list[Pair]:
+def _pairs(rows) -> list[Pair]:
+    """实体行 → (法, 条)。行是 (ProvisionVersion, ProvisionIdentity, LegalVersion, LegalInstrument, …)。"""
+    return [(row[3].title, row[1].provision_number) for row in rows]
+
+
+def _unique(rows, top_k: int) -> list:
+    """按 (法, 条) 去重——同一（法, 条）可能因多版本重复。"""
+    seen: list = []
+    keys: set = set()
+    for row in rows:
+        key = (row[3].title, row[1].provision_number)
+        if key in keys:
+            continue
+        keys.add(key)
+        seen.append(row)
+        if len(seen) == top_k:
+            break
+    return seen
+
+
+async def _keyword_rows(session, principal: Principal, strategy: Strategy, query: str, limit: int):
     statement = (
-        select(LegalInstrument.title, ProvisionIdentity.provision_number)
+        select(ProvisionVersion, ProvisionIdentity, LegalVersion, LegalInstrument, SourceArtifact)
         .select_from(ProvisionVersion)
         .join(ProvisionIdentity, ProvisionVersion.provision_identity_id == ProvisionIdentity.id)
         .join(LegalVersion, ProvisionVersion.legal_version_id == LegalVersion.id)
@@ -128,10 +147,17 @@ async def _keyword_hits(
         .where(AuthorizationService.document_scope(principal))
         .where(strategy.match(query))
         .order_by(*strategy.order(query), LegalInstrument.title, _ARTICLE_SORT)
-        .limit(top_k * 3)
+        .limit(limit)
     )
-    rows = (await session.execute(statement)).all()
-    return _dedupe([(title, number) for title, number in rows], top_k)
+    return list((await session.execute(statement)).all())
+
+
+async def _keyword_hits(
+    session, principal: Principal, strategy: Strategy, query: str, top_k: int
+) -> list[Pair]:
+    return _pairs(
+        _unique(await _keyword_rows(session, principal, strategy, query, top_k * 3), top_k)
+    )
 
 
 def _rewritten_retriever(strategy: Strategy, layers: str) -> Retriever:
@@ -171,11 +197,63 @@ def _vector_retriever(model_name: str, query_vectors: dict[str, list[float]], ma
         )
         rows = (await session.execute(statement)).all()
         # 语句返回 (ProvisionVersion, ProvisionIdentity, LegalVersion, LegalInstrument, SourceArtifact)
-        return _dedupe([(row[3].title, row[1].provision_number) for row in rows], top_k)
+        return _pairs(_unique(list(rows), top_k))
 
     return Retriever(
         f"vector:{model_name}",
         f"向量通路（{model_name}），余弦距离 ≤ {max_distance}，按距离升序",
+        search,
+    )
+
+
+def _graph_retriever(
+    strategy: Strategy, model_name: str, query_vectors: dict[str, list[float]], max_distance: float
+) -> Retriever:
+    """级联拿到种子，再把种子**引用的条款**补在后面（设计 §8.4 的一跳出边扩展）。
+
+    用来回答 §8.4 要求的「有 / 无图扩展对比」——种子部分与 `cascade` 同一口径，
+    差别只在末尾多了引用邻居。
+    """
+
+    async def search(session, principal, query: str, top_k: int) -> list[Pair]:
+        seeds: list = []
+        for variant in rewrite.rewrite(query).variants():
+            rows = await _keyword_rows(session, principal, strategy, variant, top_k * 3)
+            seeds = _unique([*seeds, *rows], top_k)
+            if len(seeds) == top_k:
+                break
+        if not seeds:
+            value = query_vectors.get(query)
+            if value is None:
+                return []
+            rows = (
+                await session.execute(
+                    vector.statement(
+                        model=model_name,
+                        query_vector=value,
+                        principal=principal,
+                        limit=top_k * 3,
+                        max_distance=max_distance,
+                    )
+                )
+            ).all()
+            seeds = _unique(list(rows), top_k)
+        if not seeds:
+            return []
+        related = (
+            await session.execute(
+                graph.statement(
+                    seed_version_ids=[row[0].id for row in seeds],
+                    principal=principal,
+                    limit=top_k * 3,
+                )
+            )
+        ).all()
+        return _pairs(_unique([*seeds, *related], top_k))
+
+    return Retriever(
+        f"graph:{strategy.name}+{model_name}",
+        f"级联 + 一跳引用扩展（{strategy.name} 取种子，命中为空用 {model_name} 兜底）",
         search,
     )
 
@@ -236,9 +314,12 @@ def _build_retrievers(
         # 改写消融：逐层加码，看每一层各自贡献多少
         for layers in rewrite_layers:
             retrievers.append(_rewritten_retriever(keyword.selected(), layers))
-    if "vector" in paths or "hybrid" in paths:
+    # cascade / graph 也要向量兜底，所以只要用到向量就先按模型建好查询向量缓存
+    if any(item in paths for item in ("vector", "hybrid", "cascade", "graph")):
         for model_name in models:
             query_vectors[model_name] = {}
+    if "vector" in paths:
+        for model_name in models:
             retrievers.append(
                 _vector_retriever(model_name, query_vectors[model_name], max_distance)
             )
@@ -260,6 +341,13 @@ def _build_retrievers(
                 _cascade_retriever(
                     _rewritten_retriever(keyword.selected(), "expand"),
                     _vector_retriever(model_name, query_vectors[model_name], max_distance),
+                )
+            )
+    if "graph" in paths:
+        for model_name in models:
+            retrievers.append(
+                _graph_retriever(
+                    keyword.selected(), model_name, query_vectors[model_name], max_distance
                 )
             )
     return retrievers, query_vectors

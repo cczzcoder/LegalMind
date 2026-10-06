@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     generation_model: str = "legalmind-qwen2.5-7b"
     # 本地推理运行时（Ollama）地址。**改它也只指向本地**——本项目的生成不走外部服务。
     ollama_host: str = "http://127.0.0.1:11434"
+    # 生成模型的上下文窗口（token），**必须与 `ops/Modelfile.qwen2.5-7b` 里的 `num_ctx` 一致**。
+    # 证据装配按它算预算（`app/modules/answering/assembly.py`）：超了 Ollama 会**静默从前面截断**，
+    # 而指令就在提示的最前面——那等于模型失去了全部约束（设计 §9.4 明令不得无提示截断）。
+    generation_context_tokens: int = 8192
     # 模型权重下载源。本机 HuggingFace 直连不通，默认走镜像（其元数据 API 403 不影响下载）。
     hf_endpoint: str = "https://hf-mirror.com"
 

@@ -10,9 +10,12 @@
 - 检索**一条都没命中**时不调用模型，直接返回「依据不足」（§9.5）；
 - **效力状态由回答层强制**，不问模型（§8.3）：依据不是现行有效版本就带提示，全部不是就**直接拒答**；
 - **模型写出来的依据要过确定性核验**（§9.3 第一层，`verification.verify`）：答案里的法律名、
-  条号、数值、引文必须落在本次证据里；**没过就不当正式答案发布**，只把草稿交人工判读。
+  条号、数值、引文必须落在本次证据里；**没过就不当正式答案发布**，只把草稿交人工判读；
+- **证据按上下文预算装配**（§8.2 第 9 步、§9.4，`assembly.assemble_evidence`）：检索只限条数
+  不限长度，装不下时推理引擎会**静默从前面截断**（先吃掉指令），所以自己算预算；装不下就
+  **如实限定回答范围**，一条都装不下就转人工。
 
-后两条都**不能交给提示词**——实测模型自己不会理会效力状态标注，也保不齐哪次编出一条条号；
+后三条都**不能交给提示词**——实测模型自己不会理会效力状态标注，也保不齐哪次编出一条条号；
 安全属性要由回答层确定性兜住。
 
 **只用本地模型**：§9.5 的决策锁定本地部署、默认关闭外部 API，所以这里没有外部回落路径。
@@ -27,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.adapters import generation
 from app.core.config import get_settings
 from app.core.security import Principal
+from app.modules.answering.assembly import assemble_evidence
 from app.modules.answering.evidence import (
     INSTRUCTIONS,
     STATUS_LABELS,
@@ -106,6 +110,9 @@ class Answer:
     verification: VerificationResult | None = None
     #: 核验未通过时，模型生成的原始草稿（供人工判读）。核验通过时为 None。
     draft: str | None = None
+    #: 证据装配的**范围**提示（§8.2 第 9 步、§9.4）：装不下全部依据时说明只覆盖了哪几条。
+    #: 与 ``status_notice`` 一样是**回答层确定性**算出来的，不是模型写的。
+    evidence_notice: str | None = None
 
     @property
     def published(self) -> bool:
@@ -207,10 +214,35 @@ async def answer_question(
             status_notice=notice,
         )
 
-    text = generation.generate(
-        model_name, build_messages(hits, question), max_new_tokens=max_new_tokens
+    # 上下文预算（§8.2 第 9 步、§9.4）：检索只限条数不限长度，装不下时推理引擎会**静默从前面
+    # 截断**——而指令就在提示最前面，那等于模型先失去全部约束。所以这里自己算、自己如实报告。
+    assembly = assemble_evidence(
+        hits,
+        question,
+        instructions_chars=len(INSTRUCTIONS),
+        max_new_tokens=max_new_tokens,
+        context_tokens=get_settings().generation_context_tokens,
     )
-    result = verify(text, question, hits)
+    if not assembly.included:
+        # 一条都装不下：不生成结论，只把条文与提示交回人工（§9.4「限制回答范围或转人工」）
+        return Answer(
+            question=question,
+            answer=assembly.notice,
+            citations=citations,
+            path=search.path,
+            model=None,
+            seconds=perf_counter() - started,
+            status_notice=notice,
+            evidence_notice=assembly.notice,
+        )
+
+    text = generation.generate(
+        model_name,
+        build_messages(assembly.included, question),
+        max_new_tokens=max_new_tokens,
+    )
+    # 核验对着**模型实际看到的那几条**——它没见过的条文不可能被它正确引用
+    result = verify(text, question, assembly.included)
     if not result.ok:
         # §9.3 第一层没过：不当正式答案发布，但草稿留着给人工（§9.4「正式答案通过门禁后发送」）
         return Answer(
@@ -223,6 +255,7 @@ async def answer_question(
             status_notice=notice,
             verification=result,
             draft=text,
+            evidence_notice=assembly.notice,
         )
 
     return Answer(
@@ -234,4 +267,5 @@ async def answer_question(
         seconds=perf_counter() - started,
         status_notice=notice,
         verification=result,
+        evidence_notice=assembly.notice,
     )

@@ -201,6 +201,73 @@ def test_status_notice_lists_every_non_current_provision():
     assert service.status_notice_for(()) is None
 
 
+async def test_oversized_evidence_refuses_instead_of_truncating(
+    monkeypatch, session_factory, make_user
+):
+    """§9.4：法律原文不得因上下文限制被**无提示**截断——装不下就不生成结论。
+
+    不设这条门禁的话，超长证据会被推理引擎**从前面静默截断**，而指令就在提示最前面——
+    模型会先失去全部约束，再失去最早的条文。
+    """
+    called = False
+
+    def explode(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("依据装不下时不应调用生成模型")
+
+    monkeypatch.setattr(generation, "available", lambda *_a, **_k: True)
+    monkeypatch.setattr(generation, "generate", explode)
+    monkeypatch.setattr(
+        service,
+        "search_provisions",
+        _pinned_search([_hit("中华人民共和国某法", "1", "文" * 20000)]),
+    )
+    user = await make_user("reader")
+    principal = Principal(
+        organization_id=user.organization_id, user_id=user.id, roles=frozenset({"reader"})
+    )
+
+    async with session_factory() as session:
+        answer = await service.answer_question(session, principal, "某法怎么规定的？")
+
+    assert called is False
+    assert answer.model is None
+    assert "上下文预算" in answer.answer
+    assert answer.evidence_notice is not None
+
+
+async def test_partial_assembly_answers_but_limits_the_scope(
+    monkeypatch, session_factory, make_user
+):
+    """装下一部分时照出结论，但**明确限定范围**并点名没装进去的是哪几条（§9.4）。"""
+    monkeypatch.setattr(generation, "available", lambda *_a, **_k: True)
+    monkeypatch.setattr(generation, "generate", lambda *_a, **_k: "模型给的结论")
+    monkeypatch.setattr(
+        service,
+        "search_provisions",
+        _pinned_search(
+            [
+                _hit("中华人民共和国甲法", "1", "第一条　短条文。", display="第一条"),
+                _hit("中华人民共和国乙法", "9", "第九条　" + "文" * 20000, display="第九条"),
+            ]
+        ),
+    )
+    user = await make_user("reader")
+    principal = Principal(
+        organization_id=user.organization_id, user_id=user.id, roles=frozenset({"reader"})
+    )
+
+    async with session_factory() as session:
+        answer = await service.answer_question(session, principal, "问题")
+
+    assert answer.answer == "模型给的结论"
+    assert answer.evidence_notice is not None
+    assert "乙法第九条" in answer.evidence_notice
+    # 引用仍回传检索命中的全部条款（那是授权证据集），范围限制由 evidence_notice 说明
+    assert len(answer.citations) == 2
+
+
 @pytest.fixture
 def storage(tmp_path, make_client):
     """存储依赖要在夹具里覆盖——在测试体内直接改 `dependency_overrides` 会泄漏到别的用例。"""

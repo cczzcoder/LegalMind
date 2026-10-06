@@ -207,6 +207,10 @@ async def ask_command(
         # 效力状态提示由**回答层**确定性给出（§8.3），不是模型写的——所以放在答案之前显眼处
         print()
         print(f"⚠️  {answer.status_notice}")
+    if answer.evidence_notice:
+        # 证据装配的范围提示（§8.2 第 9 步、§9.4）：装不下全部依据时说明只覆盖了哪几条
+        print()
+        print(f"⚠️  {answer.evidence_notice}")
     if answer.verification is not None and not answer.verification.ok:
         # §9.3 第一层没过：answer 里已经是「不当正式答案发布」的说明，草稿单独打出来给人工判读
         print()

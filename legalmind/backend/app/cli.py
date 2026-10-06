@@ -202,15 +202,15 @@ async def ask_command(
             await engine.dispose()
 
     print(f"问题：{answer.question}")
-    print(f"检索通路：{answer.path}　依据 {len(answer.citations)} 条　耗时 {answer.seconds:.1f}s")
-    if answer.status_notice:
-        # 效力状态提示由**回答层**确定性给出（§8.3），不是模型写的——所以放在答案之前显眼处
-        print()
-        print(f"⚠️  {answer.status_notice}")
-    if answer.evidence_notice:
-        # 证据装配的范围提示（§8.2 第 9 步、§9.4）：装不下全部依据时说明只覆盖了哪几条
-        print()
-        print(f"⚠️  {answer.evidence_notice}")
+    print(
+        f"检索通路：{answer.path}　依据 {len(answer.citations)} 条"
+        f"　生成时间：{answer.generated_at}　耗时 {answer.seconds:.1f}s"
+    )
+    # 门禁拦下的那几种情况里，`answer.answer` **就是**这条提示本身，别再打一遍
+    for notice in (answer.status_notice, answer.scope_notice, answer.evidence_notice):
+        if notice and notice not in answer.answer:
+            print()
+            print(f"⚠️  {notice}")
     if answer.verification is not None and not answer.verification.ok:
         # §9.3 第一层没过：answer 里已经是「不当正式答案发布」的说明，草稿单独打出来给人工判读
         print()
@@ -221,6 +221,14 @@ async def ask_command(
         print()
         print("—— 以下为模型草稿，未通过核验，仅供参考 ——")
         print(answer.draft)
+    # §20.2：每个正式输出都要带「不构成法律意见」声明与知识范围说明
+    print()
+    print(f"※ {answer.disclaimer}")
+    if not answer.published:
+        reason = {"scope": "问题涉及本人情形", "verification": "引用核验未通过"}.get(
+            answer.blocked_by, answer.blocked_by
+        )
+        print(f"※ 本结论未通过门禁（{reason}），不作为正式答案，请人工判读。")
     if answer.citations:
         print()
         print("依据：")

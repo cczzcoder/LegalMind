@@ -268,6 +268,92 @@ async def test_partial_assembly_answers_but_limits_the_scope(
     assert len(answer.citations) == 2
 
 
+async def test_personal_question_gets_no_personal_conclusion(
+    monkeypatch, session_factory, make_user
+):
+    """§20.2「不提供法律服务」+ §9.3 第三层「高风险个性化判断」转人工。
+
+    实测（2026-10-06）问「我是名特困人员，我能否领到社会救助？」，模型引用正确、内容也对，
+    但补了一句「因此，作为特困人员，可以领取社会救助」——那一步「你能领」正是越界的地方，
+    而且它还跳过了「特困人员须经认定程序」这个前提。所以命中个性化提问就**不生成结论**。
+    """
+    called = False
+
+    def explode(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("个性化提问不应生成个人结论")
+
+    monkeypatch.setattr(generation, "generate", explode)
+    monkeypatch.setattr(
+        service,
+        "search_provisions",
+        _pinned_search([_hit("中华人民共和国社会救助法", "16", "第十六条　……")]),
+    )
+    user = await make_user("reader")
+    principal = Principal(
+        organization_id=user.organization_id, user_id=user.id, roles=frozenset({"reader"})
+    )
+
+    async with session_factory() as session:
+        answer = await service.answer_question(
+            session, principal, "我是名特困人员，我能否领到社会救助？"
+        )
+
+    assert called is False
+    assert answer.blocked_by == "scope"
+    assert answer.published is False
+    assert answer.scope_notice is not None
+    assert answer.answer == answer.scope_notice
+    # 条文仍然给到——不给的是「你能领」这个结论，不是法律信息本身
+    assert len(answer.citations) == 1
+    assert answer.disclaimer
+
+
+async def test_every_answer_carries_the_disclaimer(monkeypatch, session_factory, make_user):
+    """§20.2：每个正式输出都要带「不构成法律意见」声明与知识范围说明——包括拒答。"""
+    monkeypatch.setattr(service, "search_provisions", _pinned_search([]))
+    user = await make_user("reader")
+    principal = Principal(
+        organization_id=user.organization_id, user_id=user.id, roles=frozenset({"reader"})
+    )
+
+    async with session_factory() as session:
+        answer = await service.answer_question(session, principal, "量子计算专利怎么申请？")
+
+    assert answer.answer == service.NO_EVIDENCE
+    assert "不构成法律意见" in answer.disclaimer
+    assert answer.generated_at
+
+
+async def test_published_is_false_when_the_verification_gate_blocks(
+    monkeypatch, session_factory, make_user
+):
+    """`published` 要同时覆盖两道门禁（范围 / 核验），不能只看核验。"""
+    monkeypatch.setattr(generation, "available", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        generation, "generate", lambda *_a, **_k: "依据《中华人民共和国劳动法》第一百零一条……"
+    )
+    monkeypatch.setattr(
+        service,
+        "search_provisions",
+        _pinned_search(
+            [_hit("中华人民共和国劳动法", "50", "第五十条　工资应当以货币形式按月支付。")]
+        ),
+    )
+    user = await make_user("reader")
+    principal = Principal(
+        organization_id=user.organization_id, user_id=user.id, roles=frozenset({"reader"})
+    )
+
+    async with session_factory() as session:
+        answer = await service.answer_question(session, principal, "工资怎么发？")
+
+    assert answer.blocked_by == "verification"
+    assert answer.published is False
+    assert answer.draft
+
+
 @pytest.fixture
 def storage(tmp_path, make_client):
     """存储依赖要在夹具里覆盖——在测试体内直接改 `dependency_overrides` 会泄漏到别的用例。"""

@@ -13,15 +13,21 @@
   条号、数值、引文必须落在本次证据里；**没过就不当正式答案发布**，只把草稿交人工判读；
 - **证据按上下文预算装配**（§8.2 第 9 步、§9.4，`assembly.assemble_evidence`）：检索只限条数
   不限长度，装不下时推理引擎会**静默从前面截断**（先吃掉指令），所以自己算预算；装不下就
-  **如实限定回答范围**，一条都装不下就转人工。
+  **如实限定回答范围**，一条都装不下就转人工；
+- **问的是本人情形就不给个人结论**（§20.2、§9.3 第三层，`scope.scope_notice`）：本工具是法律
+  信息辅助工具，不提供法律服务——实测模型会在「我能不能领」这类问题上补一句「因此你可以领取」，
+  那一步「你能领」就是越界。命中即不生成结论、只给条文与下一步；
+- **每个输出都带「不构成法律意见」声明与生成时间**（§20.2）：做成 `Answer` 的**字段**而不是
+  调用方的自觉，结构上发布不出一份不带声明的结论。
 
-后三条都**不能交给提示词**——实测模型自己不会理会效力状态标注，也保不齐哪次编出一条条号；
+后四条都**不能交给提示词**——实测模型自己不会理会效力状态标注，也会在个性化问题上越界；
 安全属性要由回答层确定性兜住。
 
 **只用本地模型**：§9.5 的决策锁定本地部署、默认关闭外部 API，所以这里没有外部回落路径。
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from time import perf_counter
 from uuid import UUID
 
@@ -37,6 +43,7 @@ from app.modules.answering.evidence import (
     build_evidence,
     build_messages,
 )
+from app.modules.answering.scope import DISCLAIMER, scope_notice
 
 # ⚠️ 这里**按名字导入**，不要写成 `from ... import verification`——`Answer` 有个同名字段
 # `verification`，而注解在类体里是先赋值后求值，模块名会被字段值（None）盖掉。
@@ -45,6 +52,7 @@ from app.modules.retrieval.schemas import SearchQuery
 from app.modules.retrieval.service import search_provisions
 
 __all__ = [
+    "DISCLAIMER",
     "INSTRUCTIONS",
     "STATUS_LABELS",
     "Answer",
@@ -104,23 +112,34 @@ class Answer:
     path: str
     model: str | None
     seconds: float
-    #: 依据的效力状态提示（回答层**确定性**算出，不依赖模型）。没有非现行有效依据时为 None。
+    # ---- 回答层**确定性**算出来的各种提示，都不是模型写的 ----
+    #: 依据的效力状态提示（§8.3）。没有非现行有效依据时为 None。
     status_notice: str | None = None
-    #: §9.3 第一层的核验结果。没走到生成那一步（无依据 / 依据全非现行有效）时为 None。
-    verification: VerificationResult | None = None
-    #: 核验未通过时，模型生成的原始草稿（供人工判读）。核验通过时为 None。
-    draft: str | None = None
     #: 证据装配的**范围**提示（§8.2 第 9 步、§9.4）：装不下全部依据时说明只覆盖了哪几条。
-    #: 与 ``status_notice`` 一样是**回答层确定性**算出来的，不是模型写的。
     evidence_notice: str | None = None
+    #: 提问范围的边界说明（§20.2、§9.3 第三层）：问题问的是本人情形时**不给个人结论**。
+    scope_notice: str | None = None
+    #: §20.2 要求每个正式输出都带的「不构成法律意见」声明。**恒有**，不是可选项。
+    disclaimer: str = DISCLAIMER
+    #: §20.2 要求标注的生成时间（ISO 8601，UTC）。
+    generated_at: str = field(
+        default_factory=lambda: datetime.now(UTC).isoformat(timespec="seconds")
+    )
+    # ---- 门禁 ----
+    #: §9.3 第一层的核验结果。没走到生成那一步时为 None。
+    verification: VerificationResult | None = None
+    #: 核验未通过时，模型生成的原始草稿（供人工判读）。
+    draft: str | None = None
+    #: 哪道门禁拦下了正式结论：``"scope"`` / ``"verification"``；None 表示没被拦。
+    blocked_by: str | None = None
 
     @property
     def published(self) -> bool:
         """这份结论能不能当**正式答案**用。
 
-        核验没过就不算——调用方（CLI / 未来的 API）应当据此决定怎么展示。
+        门禁拦下过就不算——调用方（CLI / 未来的 API）应当据此决定怎么展示。
         """
-        return self.verification is not None and self.verification.ok
+        return self.model is not None and self.blocked_by is None
 
 
 def non_current_citations(citations: tuple[Citation, ...]) -> tuple[Citation, ...]:
@@ -202,6 +221,24 @@ async def answer_question(
         )
 
     model_name = model or get_settings().generation_model
+    personal = scope_notice(question)
+    if personal is not None:
+        # §20.2「不提供法律服务、不替代执业律师判断」+ §9.3 第三层「高风险个性化判断」转人工：
+        # 问题问的是本人情形，就**不生成个人结论**，只把条文与下一步交回提问者。
+        # 实测模型会在这种问题上加一句「因此，作为特困人员，可以领取社会救助」——引用没错、
+        # 内容也没错，但那一步「你能领」正是越界的地方，而且它还跳过了「须经认定程序」这个前提。
+        return Answer(
+            question=question,
+            answer=personal,
+            citations=citations,
+            path=search.path,
+            model=None,
+            seconds=perf_counter() - started,
+            status_notice=notice,
+            scope_notice=personal,
+            blocked_by="scope",
+        )
+
     if not generation.available(model_name):
         # **不回落外部服务**：本地模型不可用就如实降级成「只给证据 + 转人工」（§9.5）
         return Answer(
@@ -256,6 +293,7 @@ async def answer_question(
             verification=result,
             draft=text,
             evidence_notice=assembly.notice,
+            blocked_by="verification",
         )
 
     return Answer(

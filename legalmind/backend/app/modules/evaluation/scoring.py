@@ -19,11 +19,16 @@
 """
 
 import json
-import re
 from pathlib import Path
 from typing import Any
 
-from app.modules.legal_corpus.structure import chinese_number_to_int
+# 条号抽取、去空白归一、法律简称**与回答层的确定性校验共用同一份实现**
+# （`answering/verification.py`）——评测若自带一套口径，测出来的东西和线上跑的就分叉了。
+from app.modules.answering.verification import (
+    extract_article_numbers,
+    normalize_for_match,
+    short_title,
+)
 
 #: 用例分类。`grounded` 单条依据、`multi` 需多条依据、`status` 依据未生效、`abstain` 该拒答。
 CATEGORIES = ("grounded", "multi", "status", "abstain")
@@ -46,14 +51,16 @@ THRESHOLD_KEYS = (
 )
 
 #: 只报告、不计入达标的诊断项。
-DIAGNOSTIC_KEYS = ("status_flag_rate",)
+#:
+#: - `status_flag_rate`：模型会不会**自己想到**提示效力状态。归回答层（§8.3），不是模型指标。
+#: - `verification_failure_rate`：§9.3 第一层门禁在这批答案上的**触发率**。它衡量的是
+#:   「模型 + 门禁」这条链路的兜底情况，不是模型的分数——门禁本来就不该经常响。
+DIAGNOSTIC_KEYS = ("status_flag_rate", "verification_failure_rate")
 
-_WS = re.compile(r"[\s\u3000]+")
-# 条号允许中文数字或阿拉伯数字（模型两种都可能写）；与 `structure.normalize_article_number`
-# 共用同一个中文数字转换器，避免出现第二套口径
-_ARTICLE_IN_TEXT = re.compile(
-    r"第([零一二三四五六七八九十百千0-9]{1,8})条(?:之([零一二三四五六七八九十0-9]{1,4}))?"
-)
+DIAGNOSTIC_NOTES = {
+    "status_flag_rate": "回答层职责，仅报告、不计入达标（§8.3）",
+    "verification_failure_rate": "§9.3 第一层门禁触发率，仅报告（门禁本就不该常响）",
+}
 
 #: 拒答信号。**刻意只收明确的退路说法**，不收「未规定」「不适用」这类正常表述——
 #: 否则一句「本条未规定……」会把一个正确答案误判成拒答。
@@ -78,50 +85,6 @@ STATUS_FLAG_MARKERS = (
     "已经失效",
     "已废止",
 )
-
-
-def normalize_for_match(text: str) -> str:
-    """比对前统一去空白（含全角空格）——PDF 折行空格会让逐字子串匹配失效。"""
-    return _WS.sub("", text or "")
-
-
-def short_title(title: str) -> str:
-    """法律简称：《中华人民共和国劳动法》→ 劳动法。"""
-    return title.replace("中华人民共和国", "")
-
-
-def _to_article_number(token: str, suffix: str | None) -> str | None:
-    """把抽取到的条号转成 `provision_identities.provision_number` 的形态。"""
-    if token.isdigit():
-        base = str(int(token))
-    else:
-        value = chinese_number_to_int(token)
-        if value is None:
-            return None
-        base = str(value)
-    if not suffix:
-        return base
-    if suffix.isdigit():
-        tail = str(int(suffix))
-    else:
-        converted = chinese_number_to_int(suffix)
-        if converted is None:
-            return None
-        tail = str(converted)
-    return f"{base}之{tail}"
-
-
-def extract_article_numbers(text: str) -> list[str]:
-    """从答案文本里抽条号（按出现顺序，含重复）。
-
-    「第一百条」「第100条」「第八十七条之一」都能抽出来；「第一款」这类不抽。
-    """
-    numbers = []
-    for match in _ARTICLE_IN_TEXT.finditer(text or ""):
-        number = _to_article_number(match.group(1), match.group(2))
-        if number is not None:
-            numbers.append(number)
-    return numbers
 
 
 def _mentioned_laws(answer_flat: str, laws: list[str]) -> set[str]:
@@ -199,6 +162,7 @@ def summarise(records: list[dict], thresholds: dict) -> dict:
     abstain_records = [record for record in records if record["expect_abstain"]]
     grounded_records = [record for record in records if not record["expect_abstain"]]
     status_records = [record for record in records if record["status_flag_required"]]
+    verified_records = [record for record in records if record.get("verification_ok") is not None]
 
     metrics: dict[str, float | None] = {
         "citation_recall": _mean(citation_recalls),
@@ -226,6 +190,11 @@ def summarise(records: list[dict], thresholds: dict) -> dict:
             if status_records
             else None
         ),
+        "verification_failure_rate": (
+            sum(1 for r in verified_records if not r["verification_ok"]) / len(verified_records)
+            if verified_records
+            else None
+        ),
     }
 
     checks = {}
@@ -249,7 +218,7 @@ def summarise(records: list[dict], thresholds: dict) -> dict:
         }
 
     diagnostics = {
-        key: {"value": metrics.get(key), "note": "回答层职责，仅报告、不计入达标（§8.3）"}
+        key: {"value": metrics.get(key), "note": DIAGNOSTIC_NOTES.get(key, "仅报告")}
         for key in DIAGNOSTIC_KEYS
     }
 

@@ -61,7 +61,7 @@ from sqlalchemy import select
 from app.adapters import generation
 from app.core.database import SessionFactory, engine
 from app.models import LegalInstrument, LegalVersion, ProvisionIdentity, ProvisionVersion
-from app.modules.answering import service
+from app.modules.answering import service, verification
 from app.modules.evaluation import scoring
 
 NO_ANSWER = "（未评测：模型不可用）"
@@ -241,6 +241,8 @@ def _diagnostics(record: dict) -> list[str]:
     notes = []
     if record["status_flag_required"] and not record["status_flagged"]:
         notes.append("模型未主动提示依据未生效（回答层会强制提示，见 §8.3）")
+    if record.get("verification_ok") is False:
+        notes.append(f"§9.3 第一层门禁会拦下这条：{record['verification_issues']}")
     return notes
 
 
@@ -304,6 +306,10 @@ async def run(args) -> int:
         )
         seconds = time.perf_counter() - started
         record = scoring.score_case(case, answer, evidence)
+        # §9.3 第一层的核验也跑一遍：门禁在这批答案上会不会响，是要看的事实（诊断项）
+        verified = verification.verify(answer, case["question"], pins)
+        record["verification_ok"] = verified.ok
+        record["verification_issues"] = [issue.detail for issue in verified.issues]
         record["question"] = case["question"]
         record["answer"] = answer
         record["seconds"] = seconds

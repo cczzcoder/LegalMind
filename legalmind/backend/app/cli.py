@@ -207,8 +207,16 @@ async def ask_command(
         # 效力状态提示由**回答层**确定性给出（§8.3），不是模型写的——所以放在答案之前显眼处
         print()
         print(f"⚠️  {answer.status_notice}")
+    if answer.verification is not None and not answer.verification.ok:
+        # §9.3 第一层没过：answer 里已经是「不当正式答案发布」的说明，草稿单独打出来给人工判读
+        print()
+        print("⚠️  核验未通过（设计 §9.3 第一层）")
     print()
     print(answer.answer)
+    if answer.draft:
+        print()
+        print("—— 以下为模型草稿，未通过核验，仅供参考 ——")
+        print(answer.draft)
     if answer.citations:
         print()
         print("依据：")

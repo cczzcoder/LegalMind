@@ -9,7 +9,9 @@
 - 提示里**只放检索到的条文原文**，模型看不到的东西不许说；
 - 返回的 ``citations`` 是**检索命中的条款版本**，不是模型写出来的条号——所以引用天然可核验；
 - 检索**一条都没命中**时不调用模型，直接返回「依据不足」（§9.5「本地模型不满足质量标准时提供
-  证据检索与人工审核，不开放正式自动结论」）。
+  证据检索与人工审核，不开放正式自动结论」）；
+- **效力状态由回答层强制**，不问模型：依据不是现行有效版本就带提示，全部不是就**直接拒答**
+  （§8.3、§9.5）。实测模型自己不会理会这个标注，所以这条不能交给提示词。
 
 **只用本地模型**：§9.5 的决策锁定本地部署、默认关闭外部 API，所以这里没有外部回落路径。
 """
@@ -55,6 +57,24 @@ NO_EVIDENCE = "依据不足：没有检索到与问题相关的条文，无法�
 # **不回落外部服务**——配置缺失就是不可用。
 MODEL_UNAVAILABLE = "本地生成模型不可用，未生成结论。以下是检索到的依据，请人工判读。"
 
+#: 不能作为「现行依据」的效力状态（§8.3）。
+#:
+#: ⚠️ ``unknown`` **不算**——它只表示没提取到施行日期，不等于失效（提示词里也是这么告诉模型的：
+#: 「施行日期未知只表示没提取到施行日期，不影响你依据条文内容作答」）。把它算进来会把大量
+#: 正常条文判成不可用。
+NON_CURRENT_STATUSES = frozenset({"repealed", "not_yet_effective"})
+
+#: 全部依据都不是现行有效时的**确定性拒答**（§9.5「提供证据检索与人工审核，不开放正式自动结论」）。
+#:
+#: **为什么由回答层强制、而不是写进提示词让模型自己说**：实测（§9.5 的生成质量评测，22 条用例）
+#: 证据块里明写「（尚未生效，不得作为现行依据）」，模型**照样把未生效的法律当现行依据陈述**——
+#: `status_flag_rate` 为 0。安全属性不能交给模型自觉，这是本系统「授权、证据绑定、审计由本系统
+#: 实现，不依赖框架与模型隐式行为」的一贯口径。
+NON_CURRENT_NOTICE = (
+    "依据提示：本次检索到的条文均不是现行有效版本（{detail}），不能作为现行依据下结论。"
+    "以下仅列出检索到的条文，请人工判读，或改查现行版本。"
+)
+
 
 @dataclass(frozen=True)
 class Citation:
@@ -75,6 +95,26 @@ class Answer:
     path: str
     model: str | None
     seconds: float
+    #: 依据的效力状态提示（回答层**确定性**算出，不依赖模型）。没有非现行有效依据时为 None。
+    status_notice: str | None = None
+
+
+def non_current_citations(citations: tuple[Citation, ...]) -> tuple[Citation, ...]:
+    """挑出不能作为现行依据的那几条（§8.3）。"""
+    return tuple(item for item in citations if item.legal_status in NON_CURRENT_STATUSES)
+
+
+def status_notice_for(citations: tuple[Citation, ...]) -> str | None:
+    """依据里有非现行有效的版本时给出一句提示；都没有则返回 None。"""
+    flagged = non_current_citations(citations)
+    if not flagged:
+        return None
+    detail = "；".join(
+        f"{item.instrument_title}{item.provision_display}"
+        f"（{STATUS_LABELS.get(item.legal_status, item.legal_status)}）"
+        for item in flagged
+    )
+    return NON_CURRENT_NOTICE.format(detail=detail)
 
 
 def build_evidence(hits) -> str:
@@ -113,7 +153,13 @@ async def answer_question(
     max_new_tokens: int = 512,
     model: str | None = None,
 ) -> Answer:
-    """检索 → 生成 → 带引用返回。**检索为空就拒答，不调用模型。**"""
+    """检索 → 生成 → 带引用返回。**检索为空就拒答，不调用模型。**
+
+    **效力状态由这一层强制，不问模型**（§8.3「检索结果应携带效力状态……供回答层与人工核验判断
+    依据是否现行有效」）：只要有依据不是现行有效版本，答案就带上 ``status_notice``；**若全部
+    依据都不是现行有效，直接拒答、不生成结论**（§9.5「不开放正式自动结论」）。
+    实测模型自己不会理会这个标注（见 ``NON_CURRENT_NOTICE`` 的注释），所以不能靠提示词。
+    """
     started = perf_counter()
     # 复用 P4 的检索：`semantic` 走级联（先关键词、命中为空才向量），并做授权复核与未生效屏蔽
     search = await search_provisions(
@@ -140,6 +186,20 @@ async def answer_question(
         )
         for hit in hits
     )
+    notice = status_notice_for(citations)
+
+    if notice is not None and len(non_current_citations(citations)) == len(citations):
+        # 全部依据都不是现行有效：**生成结论没有意义**——拿一部尚未生效或已被取代的法律去
+        # 下结论，正是 §8.3 要防的那件事。不调用模型，只把提示与条文交回人工（§9.5）。
+        return Answer(
+            question=question,
+            answer=notice,
+            citations=citations,
+            path=search.path,
+            model=None,
+            seconds=perf_counter() - started,
+            status_notice=notice,
+        )
 
     model_name = model or get_settings().generation_model
     if not generation.available(model_name):
@@ -151,6 +211,7 @@ async def answer_question(
             path=search.path,
             model=None,
             seconds=perf_counter() - started,
+            status_notice=notice,
         )
 
     messages = build_messages(hits, question)
@@ -162,4 +223,5 @@ async def answer_question(
         path=search.path,
         model=model_name,
         seconds=perf_counter() - started,
+        status_notice=notice,
     )

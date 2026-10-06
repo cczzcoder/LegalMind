@@ -11,9 +11,11 @@
    去空白是因为 PDF 条款带折行空格（实测「民用航 空器」），按原文直接比会漏。
 
 2. **打分**（`score_case`）。指标全是可复现的确定量：
-   引用召回 / 凭空引用（模型自己编的条号）/ 关键要素覆盖 / 禁项触犯 / 拒答正确性 / 效力状态提示。
+   引用召回 / 凭空引用（模型自己编的条号）/ 关键要素覆盖 / 禁项触犯 / 拒答正确性。
    **引用从答案文本里抽**，与「引用来自检索结果」是两回事——后者保证引用可核验，前者测模型
    到底把依据说成了哪一条。
+   **效力状态提示只作诊断、不计入达标**：那是回答层的职责（§8.3），由 `answering/service.py`
+   确定性强制、集成测试守，不是模型该做的事。首跑时把它当模型指标是**定错了范围**。
 """
 
 import json
@@ -28,6 +30,12 @@ CATEGORIES = ("grounded", "multi", "status", "abstain")
 ABSTAIN_KINDS = ("no_evidence", "irrelevant")
 
 #: 打分要用的阈值键——`summarise` 按这些键算「是否达标」（§9.5「达标后再接入正式问答」）。
+#:
+#: ⚠️ **`status_flag_rate` 不在其中**：效力状态提示是**回答层的职责**（§8.3「检索结果应携带效力
+#: 状态……供回答层与人工核验判断依据是否现行有效」），不是模型该做的事。首跑时把它当模型指标是
+#: **定错了范围**——模型指标就该只量模型。它现在作为**诊断项**报告（见 `DIAGNOSTIC_KEYS`），
+#: 用来记录「模型会不会自己想到说」，不计入达标。回答层的强制提示由集成测试守
+#: （`tests/test_answering.py`）。
 THRESHOLD_KEYS = (
     "citation_recall",
     "no_fabrication_rate",
@@ -35,8 +43,10 @@ THRESHOLD_KEYS = (
     "forbidden_rate",
     "abstain_accuracy",
     "over_abstain_rate",
-    "status_flag_rate",
 )
+
+#: 只报告、不计入达标的诊断项。
+DIAGNOSTIC_KEYS = ("status_flag_rate",)
 
 _WS = re.compile(r"[\s\u3000]+")
 # 条号允许中文数字或阿拉伯数字（模型两种都可能写）；与 `structure.normalize_article_number`
@@ -238,6 +248,11 @@ def summarise(records: list[dict], thresholds: dict) -> dict:
             ),
         }
 
+    diagnostics = {
+        key: {"value": metrics.get(key), "note": "回答层职责，仅报告、不计入达标（§8.3）"}
+        for key in DIAGNOSTIC_KEYS
+    }
+
     return {
         "cases": len(records),
         "counts": {
@@ -247,6 +262,7 @@ def summarise(records: list[dict], thresholds: dict) -> dict:
         },
         "metrics": metrics,
         "checks": checks,
+        "diagnostics": diagnostics,
         "passed": all(check["ok"] for check in checks.values() if check["ok"] is not None),
     }
 

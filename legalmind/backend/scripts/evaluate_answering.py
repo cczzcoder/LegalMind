@@ -163,6 +163,15 @@ def _markdown(payload: dict) -> str:
 
     lines += [
         "",
+        "## 诊断（不计入达标）",
+        "",
+    ]
+    for key, item in summary.get("diagnostics", {}).items():
+        value = "—" if item["value"] is None else f"{item['value']:.3f}"
+        lines.append(f"- {labels.get(key, key)}：{value}（{item['note']}）")
+
+    lines += [
+        "",
         "## 逐条",
         "",
         "| 用例 | 类别 | 引用召回 | 关键要素 | 凭空引用 | 禁项 | 拒答 | 耗时 |",
@@ -190,6 +199,13 @@ def _markdown(payload: dict) -> str:
         lines.append(f"- 期望引用：{record['expected_citations']}")
         lines.append(f"- 答案：{record['answer'] or '（空）'}")
         lines.append("")
+
+    flagged = [r for r in payload["records"] if r.get("diagnostics")]
+    if flagged:
+        lines += ["## 诊断明细", ""]
+        for record in flagged:
+            lines.append(f"- {record['id']}：{'；'.join(record['diagnostics'])}")
+        lines.append("")
     return "\n".join(lines) + "\n"
 
 
@@ -212,9 +228,20 @@ def _problems(record: dict) -> list[str]:
         issues.append(f"凭空引用：{record['unwarranted_citations']}")
     if record["forbidden_hits"]:
         issues.append(f"说了干扰条款的规则：{record['forbidden_hits']}")
-    if record["status_flag_required"] and not record["status_flagged"]:
-        issues.append("未提示依据未生效")
     return issues
+
+
+def _diagnostics(record: dict) -> list[str]:
+    """只报告、不算问题。
+
+    **效力状态提示是回答层的职责**（§8.3），不是模型该做的事——所以「模型没自己想到说」是
+    诊断信息，不是模型的缺陷。回答层的强制提示由 `answering/service.py` 确定性实现、
+    `tests/test_answering.py` 守。
+    """
+    notes = []
+    if record["status_flag_required"] and not record["status_flagged"]:
+        notes.append("模型未主动提示依据未生效（回答层会强制提示，见 §8.3）")
+    return notes
 
 
 async def run(args) -> int:
@@ -282,6 +309,7 @@ async def run(args) -> int:
         record["seconds"] = seconds
         record["note"] = case.get("note")
         record["problems"] = _problems(record)
+        record["diagnostics"] = _diagnostics(record)
         records.append(record)
         flag = "OK" if not record["problems"] else "!!"
         print(f"  [{flag}] {record['id']} {seconds:5.1f}s  {case['question']}")
@@ -310,6 +338,9 @@ async def run(args) -> int:
         value = "—" if check["value"] is None else f"{check['value']:.3f}"
         mark = "—" if check["ok"] is None else ("✓" if check["ok"] else "✗")
         print(f"  {mark} {key}: {value}（阈值 {check['threshold']}）")
+    for key, item in summary.get("diagnostics", {}).items():
+        value = "—" if item["value"] is None else f"{item['value']:.3f}"
+        print(f"  · {key}: {value}（诊断，{item['note']}）")
     print(f"报告：{json_path}")
     print(f"      {md_path}")
     if args.json:

@@ -203,6 +203,10 @@ async def ask_command(
 
     print(f"问题：{answer.question}")
     print(f"检索通路：{answer.path}　依据 {len(answer.citations)} 条　耗时 {answer.seconds:.1f}s")
+    if answer.status_notice:
+        # 效力状态提示由**回答层**确定性给出（§8.3），不是模型写的——所以放在答案之前显眼处
+        print()
+        print(f"⚠️  {answer.status_notice}")
     print()
     print(answer.answer)
     if answer.citations:

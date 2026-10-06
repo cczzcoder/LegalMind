@@ -14,12 +14,18 @@ from app.adapters import generation
 from app.core.security import Principal
 from app.models import LegalInstrument, LegalVersion, ProvisionIdentity, ProvisionVersion
 from app.modules.answering import service
-from app.modules.retrieval.schemas import CitationOut, ProvisionHit
+from app.modules.retrieval.schemas import CitationOut, ProvisionHit, SearchResponse
 
 pytestmark = pytest.mark.anyio
 
 
-def _hit(title: str, number: str, text: str, display: str | None = None) -> ProvisionHit:
+def _hit(
+    title: str,
+    number: str,
+    text: str,
+    display: str | None = None,
+    status: str = "effective",
+) -> ProvisionHit:
     return ProvisionHit(
         instrument_title=title,
         instrument_type="law",
@@ -27,7 +33,7 @@ def _hit(title: str, number: str, text: str, display: str | None = None) -> Prov
         issuing_body="测试机关",
         document_number=None,
         version_label="2026年",
-        legal_status="effective",
+        legal_status=status,
         review_status="approved",
         promulgated_on=None,
         effective_from=None,
@@ -46,6 +52,15 @@ def _hit(title: str, number: str, text: str, display: str | None = None) -> Prov
             chunk_id=uuid4(),
         ),
     )
+
+
+def _pinned_search(hits, path: str = "keyword"):
+    """把检索换成固定结果——效力状态门禁要测的是回答层，不是检索。"""
+
+    async def search(_session, _principal, _query):
+        return SearchResponse(hits=list(hits), truncated=False, path=path)
+
+    return search
 
 
 def test_evidence_block_carries_only_the_provision_text():
@@ -94,6 +109,98 @@ async def test_answer_without_evidence_refuses_and_never_calls_the_model(
     assert answer.model is None
 
 
+async def test_evidence_that_is_not_current_refuses_to_conclude(
+    monkeypatch, session_factory, make_user
+):
+    """§8.3 + §9.5：拿一部尚未生效的法律去下结论，正是最该防的那件事。
+
+    **这条不能交给模型**：实测（§9.5 的生成质量评测）证据块里明写「（尚未生效，不得作为现行
+    依据）」，模型照样把它当现行依据陈述（`status_flag_rate` 为 0）。所以由回答层确定性拒答，
+    且**不调用模型**——生成结论本来就没有意义。
+    """
+    called = False
+
+    def explode(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("依据全部不是现行有效时不应调用生成模型")
+
+    monkeypatch.setattr(generation, "generate", explode)
+    monkeypatch.setattr(
+        service,
+        "search_provisions",
+        _pinned_search([_hit("中华人民共和国某法", "2", "第二条　……", status="not_yet_effective")]),
+    )
+    user = await make_user("reader")
+    principal = Principal(
+        organization_id=user.organization_id, user_id=user.id, roles=frozenset({"reader"})
+    )
+
+    async with session_factory() as session:
+        answer = await service.answer_question(session, principal, "某法怎么规定的？")
+
+    assert called is False
+    assert answer.model is None
+    assert answer.status_notice is not None
+    assert "现行有效" in answer.status_notice
+    assert answer.answer == answer.status_notice
+    assert len(answer.citations) == 1
+
+
+async def test_status_notice_is_attached_when_only_some_evidence_is_not_current(
+    monkeypatch, session_factory, make_user
+):
+    """只要有一条依据不能当现行依据，答案就带上提示——但结论照出（有效的那条还在）。"""
+    monkeypatch.setattr(generation, "available", lambda *_a, **_k: True)
+    monkeypatch.setattr(generation, "generate", lambda *_a, **_k: "模型给的结论")
+    monkeypatch.setattr(
+        service,
+        "search_provisions",
+        _pinned_search(
+            [
+                _hit("中华人民共和国甲法", "1", "第一条　……", status="effective"),
+                _hit("中华人民共和国乙法", "9", "第九条　……", status="repealed"),
+            ]
+        ),
+    )
+    user = await make_user("reader")
+    principal = Principal(
+        organization_id=user.organization_id, user_id=user.id, roles=frozenset({"reader"})
+    )
+
+    async with session_factory() as session:
+        answer = await service.answer_question(session, principal, "问题")
+
+    assert answer.answer == "模型给的结论"
+    assert answer.status_notice is not None
+    assert "已被取代" in answer.status_notice
+
+
+def test_unknown_status_is_not_treated_as_non_current():
+    """`unknown` 只表示没提取到施行日期，**不等于失效**（提示词里也是这么告诉模型的）。
+
+    把它算成不可用会把这份语料里大量正常条文判成不能用——13 部法律里有 7 部的状态就是 `unknown`。
+    """
+    citations = (
+        service.Citation("甲法", "1", "第一条", "unknown", uuid4()),
+        service.Citation("乙法", "2", "第二条", "effective", uuid4()),
+    )
+    assert service.status_notice_for(citations) is None
+    assert service.non_current_citations(citations) == ()
+
+
+def test_status_notice_lists_every_non_current_provision():
+    citations = (
+        service.Citation("甲法", "1", "第一条", "repealed", uuid4()),
+        service.Citation("乙法", "2", "第二条", "not_yet_effective", uuid4()),
+    )
+    notice = service.status_notice_for(citations)
+    assert notice is not None
+    assert "甲法第一条" in notice and "已被取代" in notice
+    assert "乙法第二条" in notice and "尚未生效" in notice
+    assert service.status_notice_for(()) is None
+
+
 @pytest.fixture
 def storage(tmp_path, make_client):
     """存储依赖要在夹具里覆盖——在测试体内直接改 `dependency_overrides` 会泄漏到别的用例。"""
@@ -115,10 +222,14 @@ async def test_answer_returns_the_retrieved_provisions_as_citations(
     from app.modules.parsing.service import parse_artifact
     from tests.helpers import import_document_for_parsing
 
-    name = f"示例测试法（{uuid4().hex[:8]}）"
+    # ⚠️ **必须让这条用例的条文里有一个全库唯一的词**：测试库跨运行累积，同一段条文已经被种了
+    # 几百遍（实测 `示例测试法` 有 536 部），`limit=5` 的结果里根本轮不到刚建的这部。原先靠
+    # 「标题带唯一后缀」不够——标题不在条款正文里，关键词段搜的是正文。
+    token = uuid4().hex[:8]
+    name = f"示例测试法（{token}）"
     content = (
         f"{name}\n（2026年5月1日第十四届全国人民代表大会常务委员会第一次会议通过）\n"
-        "第一条　用人单位无故不缴纳社会保险费的，由劳动行政部门责令其限期缴纳。\n"
+        f"第一条　{token}用人单位无故不缴纳社会保险费的，由劳动行政部门责令其限期缴纳。\n"
     ).encode()
     editor, document_id = await import_document_for_parsing(
         make_client, make_user, content, f"{name}.txt"
@@ -139,10 +250,11 @@ async def test_answer_returns_the_retrieved_provisions_as_citations(
     )
 
     # 查询写成空格分隔的多词，且每个词都确实出现在条文里：测试库没有向量，级联的兜底段是空的，
-    # 得靠关键词段命中（`all_terms_flat` 要求每个词都命中，写错一个词整条就落空）
+    # 得靠关键词段命中（`all_terms_flat` 要求每个词都命中，写错一个词整条就落空）。
+    # 带上唯一词，保证命中的就是刚建的这部法，而不是累积下来的同名旧数据。
     async with session_factory() as session:
         answer = await service.answer_question(
-            session, principal, "用人单位 社会保险费 劳动行政部门"
+            session, principal, f"{token} 用人单位 社会保险费 劳动行政部门"
         )
 
     assert answer.answer == "这是模型生成的答案（测试替身）"

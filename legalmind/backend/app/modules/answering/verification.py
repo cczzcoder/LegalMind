@@ -10,8 +10,10 @@
 
 **本版实现四项**（§9.3 第一层共六项）：
 
-- 引用 ID 是否存在于本次授权证据集 → 答案里的**指名引用**（法名 + 同一句内的条号）必须落在证据集内；
-  只提法律名而没引条号不算引用——那通常是在说明「缺什么」（见 `verify` 里的注释）；
+- 引用 ID 是否存在于本次授权证据集 → **结构化输出的主路径**走 `verify_claims`：`evidence_ids`
+  必须落在证据编号里、**每条主张至少要有一个编号**（没有编号的主张就是没有依据）；自由文本里
+  的**指名引用**（法名 + 同一句内的条号）也查，只提法名而没引条号不算引用——那通常是在说明
+  「缺什么」（见 `_check_text` 里的注释）；
 - 条号是否一致 → 答案里的**条号**必须是证据条款本身、或证据正文里出现过的条号
   （按 `normalize_article_number` 同一套口径归一后比对——模型写「第一百条」还是「第100条」都认）；
 - 数值是否来自输入或明确证据 → 答案里的阿拉伯数值必须出现在证据正文或问题里；
@@ -123,11 +125,9 @@ def _supported_text(evidence, question: str) -> str:
     return normalize_for_match("".join(parts))
 
 
-def verify(answer_text: str, question: str, evidence) -> VerificationResult:
-    """校验一段模型答案是否只依据了本次证据。`evidence` 是**实际喂给模型**的证据项。"""
-    items = list(evidence)
+def _check_text(answer_text: str, question: str, items: list, evidence_flat: str) -> list[Issue]:
+    """自由文本层面的四项检查（法名 / 条号 / 数值 / 引文）。"""
     issues: list[Issue] = []
-    evidence_flat = normalize_for_match("".join(item.text or "" for item in items))
 
     # 1) **指名引用**必须落在证据里：法名后面（同一句内）跟着条号的，才算「引用」。
     #
@@ -173,4 +173,46 @@ def verify(answer_text: str, question: str, evidence) -> VerificationResult:
         if quoted not in evidence_flat:
             issues.append(Issue("unsupported_quote", f"引文不在证据正文里：{match.group(1)[:40]}"))
 
+    return issues
+
+
+def verify(answer_text: str, question: str, evidence) -> VerificationResult:
+    """校验一段**自由文本**是否只依据了本次证据。
+
+    结构化输出（§9.2）之后主路径走 `verify_claims`；这里保留文本层检查，因为**主张正文本身
+    仍可能写出证据外的条号**，两者是叠加的。
+    """
+    items = list(evidence)
+    evidence_flat = normalize_for_match("".join(item.text or "" for item in items))
+    issues = _check_text(answer_text, question, items, evidence_flat)
+    return VerificationResult(ok=not issues, issues=tuple(issues))
+
+
+def verify_claims(answer, question: str, evidence) -> VerificationResult:
+    """校验**结构化主张**（§9.2）：证据编号必须存在、每条主张都必须带编号，主张正文再过文本检查。
+
+    `answer` 是 `claims.StructuredAnswer`。**这才是 §9.3 第一层该有的形态**——引用是 ID，
+    「在不在本次证据集里」是集合判断，不用猜模型把哪一句写成了引用。
+    """
+    items = list(evidence)
+    issues: list[Issue] = []
+    allowed = {str(index) for index in range(1, len(items) + 1)}
+
+    for claim in answer.claims:
+        excerpt = (claim.text or "")[:40]
+        unknown = [item for item in claim.evidence_ids if item not in allowed]
+        if unknown:
+            issues.append(
+                Issue("unwarranted_evidence", f"主张「{excerpt}」引用了不存在的证据编号 {unknown}")
+            )
+        if not claim.evidence_ids:
+            # §9.2「模型仅输出结构化主张**和允许的证据 ID**」：没有编号的主张就是没有依据
+            issues.append(Issue("unsupported_claim", f"主张「{excerpt}」没有给出证据编号"))
+
+    evidence_flat = normalize_for_match("".join(item.text or "" for item in items))
+    issues.extend(
+        _check_text(
+            "\n".join(claim.text or "" for claim in answer.claims), question, items, evidence_flat
+        )
+    )
     return VerificationResult(ok=not issues, issues=tuple(issues))

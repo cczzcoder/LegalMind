@@ -36,18 +36,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.adapters import generation
 from app.core.config import get_settings
 from app.core.security import Principal
+from app.modules.answering import claims
 from app.modules.answering.assembly import assemble_evidence
 from app.modules.answering.evidence import (
     INSTRUCTIONS,
     STATUS_LABELS,
     build_evidence,
     build_messages,
+    evidence_display,
 )
 from app.modules.answering.scope import DISCLAIMER, scope_notice
 
 # ⚠️ 这里**按名字导入**，不要写成 `from ... import verification`——`Answer` 有个同名字段
 # `verification`，而注解在类体里是先赋值后求值，模块名会被字段值（None）盖掉。
-from app.modules.answering.verification import VerificationResult, verify
+from app.modules.answering.verification import VerificationResult, verify_claims
 from app.modules.retrieval.schemas import SearchQuery
 from app.modules.retrieval.service import search_provisions
 
@@ -72,6 +74,11 @@ MODEL_UNAVAILABLE = "本地生成模型不可用，未生成结论。以下是�
 VERIFICATION_FAILED_NOTICE = (
     "结论未通过核验，不作为正式答案发布（设计 §9.3 第一层）。核验发现：{issues}。"
     "以下是模型生成但未通过核验的草稿，仅供参考，请人工判读。"
+)
+# §9.2 要求模型只输出结构化主张与证据 ID；模型没照做时**不当正式答案发布**。
+STRUCTURE_FAILED_NOTICE = (
+    "模型没有按约定输出结构化结论（{reason}），未作为正式答案发布（设计 §9.2）。"
+    "以下是模型的原始输出，请人工判读。"
 )
 
 #: 不能作为「现行依据」的效力状态（§8.3）。
@@ -130,8 +137,12 @@ class Answer:
     verification: VerificationResult | None = None
     #: 核验未通过时，模型生成的原始草稿（供人工判读）。
     draft: str | None = None
-    #: 哪道门禁拦下了正式结论：``"scope"`` / ``"verification"``；None 表示没被拦。
+    #: 哪道门禁拦下了正式结论：``"scope"`` / ``"verification"`` / ``"format"``；None 表示没被拦。
     blocked_by: str | None = None
+    #: 本次结论**实际引用**的证据编号（服务端从结构化主张里取，§9.2）。拒答或未生成时为空。
+    cited_evidence_ids: tuple[str, ...] = ()
+    #: 模型输出需要**容错修复**才能解析（见 `claims.parse`）。用来观察模型的规矩程度。
+    repaired_output: bool = False
 
     @property
     def published(self) -> bool:
@@ -277,9 +288,28 @@ async def answer_question(
         model_name,
         build_messages(assembly.included, question),
         max_new_tokens=max_new_tokens,
+        # **约束解码**：只写 format="json" 挡不住残缺 JSON（见 generation.generate 的注释）
+        schema=claims.SCHEMA,
     )
+    # §9.2：模型只给「主张 + 证据编号」，引用由服务端从编号渲染——所以先解析，再核验，再渲染
+    parsed = claims.parse(text)
+    if not parsed.ok:
+        # 模型没按约定输出结构化结果：**不当正式答案发布**，原始输出留给人工
+        return Answer(
+            question=question,
+            answer=STRUCTURE_FAILED_NOTICE.format(reason=parsed.error),
+            citations=citations,
+            path=search.path,
+            model=model_name,
+            seconds=perf_counter() - started,
+            status_notice=notice,
+            evidence_notice=assembly.notice,
+            draft=text,
+            blocked_by="format",
+        )
+
     # 核验对着**模型实际看到的那几条**——它没见过的条文不可能被它正确引用
-    result = verify(text, question, assembly.included)
+    result = verify_claims(parsed.answer, question, assembly.included)
     if not result.ok:
         # §9.3 第一层没过：不当正式答案发布，但草稿留着给人工（§9.4「正式答案通过门禁后发送」）
         return Answer(
@@ -298,7 +328,7 @@ async def answer_question(
 
     return Answer(
         question=question,
-        answer=text,
+        answer=claims.render(parsed.answer, evidence_display(assembly.included)),
         citations=citations,
         path=search.path,
         model=model_name,
@@ -306,4 +336,6 @@ async def answer_question(
         status_notice=notice,
         verification=result,
         evidence_notice=assembly.notice,
+        cited_evidence_ids=parsed.answer.cited_evidence_ids,
+        repaired_output=parsed.repaired,
     )

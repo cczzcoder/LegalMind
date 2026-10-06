@@ -115,10 +115,16 @@ def generate(
     *,
     max_new_tokens: int = 512,
     timeout: float = 600.0,
+    schema: dict | None = None,
 ) -> str:
     """按对话消息生成回复。
 
     温度取 0（**贪心解码**）——法律场景要可复现，同一个问题不该给出两个答案。
+
+    ``schema`` 是给 Ollama 的 **JSON Schema**，走**约束解码**（设计 §9.2 要求模型只输出结构化
+    主张与证据 ID）。⚠️ **别用 ``format: "json"`` 代替它**——那只是「请输出 JSON」的软约束，
+    实测 22 条金标准里 **11 条**输出残缺（`"limitations[]`，键与空数组之间漏了冒号），
+    换成完整 schema 后同一批用例 **7/7 通过**（见《技术决策与踩坑记录》§5.11）。
     """
     payload = {
         "model": name,
@@ -126,5 +132,7 @@ def generate(
         "stream": False,
         "options": {"temperature": 0, "num_predict": max_new_tokens},
     }
+    if schema is not None:
+        payload["format"] = schema
     result = _post("/api/chat", payload, timeout=timeout)
     return (result.get("message") or {}).get("content", "").strip()

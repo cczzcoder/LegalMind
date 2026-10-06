@@ -5,6 +5,7 @@
 真正的生成质量要等评测（§9.5「本地生成模型单独评测，达标后再接入正式问答」）。
 """
 
+import json
 from uuid import uuid4
 
 import pytest
@@ -51,6 +52,18 @@ def _hit(
             artifact_id=uuid4(),
             chunk_id=uuid4(),
         ),
+    )
+
+
+def _structured(text: str, evidence_ids=("1",)) -> str:
+    """模型的结构化输出（§9.2）——**测试替身也得按约定来**，否则会被格式门禁拦下。"""
+    return json.dumps(
+        {
+            "claims": [{"claim_id": "c1", "text": text, "evidence_ids": list(evidence_ids)}],
+            "missing_facts": [],
+            "conflicts": [],
+        },
+        ensure_ascii=False,
     )
 
 
@@ -152,13 +165,13 @@ async def test_status_notice_is_attached_when_only_some_evidence_is_not_current(
 ):
     """只要有一条依据不能当现行依据，答案就带上提示——但结论照出（有效的那条还在）。"""
     monkeypatch.setattr(generation, "available", lambda *_a, **_k: True)
-    monkeypatch.setattr(generation, "generate", lambda *_a, **_k: "模型给的结论")
+    monkeypatch.setattr(generation, "generate", lambda *_a, **_k: _structured("模型给的结论"))
     monkeypatch.setattr(
         service,
         "search_provisions",
         _pinned_search(
             [
-                _hit("中华人民共和国甲法", "1", "第一条　……", status="effective"),
+                _hit("中华人民共和国甲法", "1", "第一条　……", display="第一条", status="effective"),
                 _hit("中华人民共和国乙法", "9", "第九条　……", status="repealed"),
             ]
         ),
@@ -171,7 +184,10 @@ async def test_status_notice_is_attached_when_only_some_evidence_is_not_current(
     async with session_factory() as session:
         answer = await service.answer_question(session, principal, "问题")
 
-    assert answer.answer == "模型给的结论"
+    assert "模型给的结论" in answer.answer
+    # 引用由**服务端**从证据编号渲染（§9.2），不是模型写的
+    assert "《中华人民共和国甲法》第一条" in answer.answer
+    assert answer.cited_evidence_ids == ("1",)
     assert answer.status_notice is not None
     assert "已被取代" in answer.status_notice
 
@@ -242,7 +258,7 @@ async def test_partial_assembly_answers_but_limits_the_scope(
 ):
     """装下一部分时照出结论，但**明确限定范围**并点名没装进去的是哪几条（§9.4）。"""
     monkeypatch.setattr(generation, "available", lambda *_a, **_k: True)
-    monkeypatch.setattr(generation, "generate", lambda *_a, **_k: "模型给的结论")
+    monkeypatch.setattr(generation, "generate", lambda *_a, **_k: _structured("模型给的结论"))
     monkeypatch.setattr(
         service,
         "search_provisions",
@@ -261,7 +277,7 @@ async def test_partial_assembly_answers_but_limits_the_scope(
     async with session_factory() as session:
         answer = await service.answer_question(session, principal, "问题")
 
-    assert answer.answer == "模型给的结论"
+    assert "模型给的结论" in answer.answer
     assert answer.evidence_notice is not None
     assert "乙法第九条" in answer.evidence_notice
     # 引用仍回传检索命中的全部条款（那是授权证据集），范围限制由 evidence_notice 说明
@@ -332,7 +348,9 @@ async def test_published_is_false_when_the_verification_gate_blocks(
     """`published` 要同时覆盖两道门禁（范围 / 核验），不能只看核验。"""
     monkeypatch.setattr(generation, "available", lambda *_a, **_k: True)
     monkeypatch.setattr(
-        generation, "generate", lambda *_a, **_k: "依据《中华人民共和国劳动法》第一百零一条……"
+        generation,
+        "generate",
+        lambda *_a, **_k: _structured("依据《中华人民共和国劳动法》第一百零一条……", ["9"]),
     )
     monkeypatch.setattr(
         service,
@@ -352,6 +370,32 @@ async def test_published_is_false_when_the_verification_gate_blocks(
     assert answer.blocked_by == "verification"
     assert answer.published is False
     assert answer.draft
+
+
+async def test_unstructured_output_is_not_published(monkeypatch, session_factory, make_user):
+    """§9.2 要求模型只输出结构化主张与证据 ID——没照做就不当正式答案发布。"""
+    monkeypatch.setattr(generation, "available", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        generation, "generate", lambda *_a, **_k: "根据条文，工资应当以货币形式支付。"
+    )
+    monkeypatch.setattr(
+        service,
+        "search_provisions",
+        _pinned_search([_hit("中华人民共和国劳动法", "50", "第五十条　……")]),
+    )
+    user = await make_user("reader")
+    principal = Principal(
+        organization_id=user.organization_id, user_id=user.id, roles=frozenset({"reader"})
+    )
+
+    async with session_factory() as session:
+        answer = await service.answer_question(session, principal, "工资怎么发？")
+
+    assert answer.blocked_by == "format"
+    assert answer.published is False
+    assert "结构化" in answer.answer
+    # 原始输出要留着给人工判读，不能丢
+    assert answer.draft == "根据条文，工资应当以货币形式支付。"
 
 
 @pytest.fixture
@@ -396,7 +440,9 @@ async def test_answer_returns_the_retrieved_provisions_as_citations(
         )
 
     monkeypatch.setattr(generation, "available", lambda *_a, **_k: True)
-    monkeypatch.setattr(generation, "generate", lambda *_a, **_k: "这是模型生成的答案（测试替身）")
+    monkeypatch.setattr(
+        generation, "generate", lambda *_a, **_k: _structured("这是模型生成的答案（测试替身）")
+    )
     user = await make_user("reader")
     principal = Principal(
         organization_id=user.organization_id, user_id=user.id, roles=frozenset({"reader"})
@@ -410,7 +456,8 @@ async def test_answer_returns_the_retrieved_provisions_as_citations(
             session, principal, f"{token} 用人单位 社会保险费 劳动行政部门"
         )
 
-    assert answer.answer == "这是模型生成的答案（测试替身）"
+    assert "这是模型生成的答案（测试替身）" in answer.answer
+    assert answer.published is True
     assert answer.model is not None
     assert answer.citations, "检索有命中时引用不该为空"
     # 测试库共享且跨运行累积，别的用例也种了含相同词的法律——只要求**我这部法在引用里**

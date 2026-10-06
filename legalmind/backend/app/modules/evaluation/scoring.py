@@ -55,11 +55,12 @@ THRESHOLD_KEYS = (
 #: - `status_flag_rate`：模型会不会**自己想到**提示效力状态。归回答层（§8.3），不是模型指标。
 #: - `verification_failure_rate`：§9.3 第一层门禁在这批答案上的**触发率**。它衡量的是
 #:   「模型 + 门禁」这条链路的兜底情况，不是模型的分数——门禁本来就不该经常响。
-DIAGNOSTIC_KEYS = ("status_flag_rate", "verification_failure_rate")
+DIAGNOSTIC_KEYS = ("status_flag_rate", "verification_failure_rate", "format_failure_rate")
 
 DIAGNOSTIC_NOTES = {
     "status_flag_rate": "回答层职责，仅报告、不计入达标（§8.3）",
     "verification_failure_rate": "§9.3 第一层门禁触发率，仅报告（门禁本就不该常响）",
+    "format_failure_rate": "§9.2 结构化输出解析失败率，仅报告（含容错修复后仍失败）",
 }
 
 #: 拒答信号。**刻意只收明确的退路说法**，不收「未规定」「不适用」这类正常表述——
@@ -92,25 +93,51 @@ def _mentioned_laws(answer_flat: str, laws: list[str]) -> set[str]:
     return {law for law in laws if short_title(law) in answer_flat or law in answer_flat}
 
 
-def score_case(case: dict, answer: str, evidence: list[dict]) -> dict:
+def score_case(
+    case: dict,
+    answer: str,
+    evidence: list[dict],
+    *,
+    cited_evidence_ids: tuple[str, ...] | None = None,
+    abstained: bool | None = None,
+) -> dict:
     """给一条用例的答案打分。`evidence` 是**实际喂给模型**的证据（顺序一致）。
 
     每个 `evidence` 项需要 `law` / `article` / `text` / `legal_status` 四个字段。
+
+    - ``cited_evidence_ids`` 给了就走**结构化路径**（§9.2）：引用是证据编号，命中判断是集合运算，
+      不用再猜模型把哪一句写成了引用；没给则退回文本路径（从答案里正则抽条号）。
+    - ``abstained`` 给了就以它为准：结构化输出下**拒答的形态是「一条主张都没有」**，
+      正文可能是空的，靠词面标记判断不出来。
     """
     answer_flat = normalize_for_match(answer)
-    mentioned = extract_article_numbers(answer)
-    mentioned_set = set(mentioned)
+    mentioned_set = set(extract_article_numbers(answer))
     evidence_articles = {item["article"] for item in evidence}
     evidence_laws = [item["law"] for item in evidence]
     mentioned_laws = _mentioned_laws(answer_flat, evidence_laws)
 
     expect = [(law, article) for law, article in case.get("expect_citations", [])]
-    cited_expected = []
-    for law, article in expect:
-        # 只有一部证据法律时，光有条号也算命中（模型写「第一百条」没写法律名）
-        law_ok = len(set(evidence_laws)) == 1 or law in mentioned_laws
-        if article in mentioned_set and law_ok:
-            cited_expected.append([law, article])
+    cited_expected: list[list[str]] = []
+    unwarranted_evidence_ids: list[str] = []
+    if cited_evidence_ids is not None:
+        allowed_ids = {str(index) for index in range(1, len(evidence) + 1)}
+        cited_set = set(cited_evidence_ids)
+        index_of = {
+            (item["law"], item["article"]): str(index)
+            for index, item in enumerate(evidence, start=1)
+        }
+        for law, article in expect:
+            if index_of.get((law, article)) in cited_set:
+                cited_expected.append([law, article])
+        unwarranted_evidence_ids = sorted(
+            cited_set - allowed_ids, key=lambda item: (len(item), item)
+        )
+    else:
+        for law, article in expect:
+            # 只有一部证据法律时，光有条号也算命中（模型写「第一百条」没写法律名）
+            law_ok = len(set(evidence_laws)) == 1 or law in mentioned_laws
+            if article in mentioned_set and law_ok:
+                cited_expected.append([law, article])
 
     # 凭空引用：答案里出现、却不在本次证据里的条号。**这是最该盯住的幻觉信号**——
     # 模型把不存在的条号说成依据，比答得笼统危险得多。
@@ -122,7 +149,8 @@ def score_case(case: dict, answer: str, evidence: list[dict]) -> dict:
     forbidden = [fact for fact in case.get("forbidden_facts", []) if normalize_for_match(fact)]
     forbidden_hits = [fact for fact in forbidden if normalize_for_match(fact) in answer_flat]
 
-    abstained = any(marker in answer_flat for marker in ABSTAIN_MARKERS)
+    if abstained is None:
+        abstained = any(marker in answer_flat for marker in ABSTAIN_MARKERS)
     expect_abstain = bool(case.get("expect_abstain"))
 
     return {
@@ -134,6 +162,7 @@ def score_case(case: dict, answer: str, evidence: list[dict]) -> dict:
         "cited_expected": cited_expected,
         "expected_citations": [list(pair) for pair in expect],
         "unwarranted_citations": unwarranted,
+        "unwarranted_evidence_ids": unwarranted_evidence_ids,
         "fact_coverage": (len(hit_facts) / len(required)) if required else None,
         "missing_facts": [fact for fact in required if fact not in answer_flat],
         "forbidden_hits": forbidden_hits,
@@ -163,11 +192,17 @@ def summarise(records: list[dict], thresholds: dict) -> dict:
     grounded_records = [record for record in records if not record["expect_abstain"]]
     status_records = [record for record in records if record["status_flag_required"]]
     verified_records = [record for record in records if record.get("verification_ok") is not None]
+    formatted_records = [record for record in records if record.get("format_ok") is not None]
 
     metrics: dict[str, float | None] = {
         "citation_recall": _mean(citation_recalls),
         "no_fabrication_rate": (
-            sum(1 for r in records if not r["unwarranted_citations"]) / len(records)
+            sum(
+                1
+                for r in records
+                if not r["unwarranted_citations"] and not r.get("unwarranted_evidence_ids")
+            )
+            / len(records)
             if records
             else None
         ),
@@ -193,6 +228,11 @@ def summarise(records: list[dict], thresholds: dict) -> dict:
         "verification_failure_rate": (
             sum(1 for r in verified_records if not r["verification_ok"]) / len(verified_records)
             if verified_records
+            else None
+        ),
+        "format_failure_rate": (
+            sum(1 for r in formatted_records if not r["format_ok"]) / len(formatted_records)
+            if formatted_records
             else None
         ),
     }

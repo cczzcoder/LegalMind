@@ -61,7 +61,8 @@ from sqlalchemy import select
 from app.adapters import generation
 from app.core.database import SessionFactory, engine
 from app.models import LegalInstrument, LegalVersion, ProvisionIdentity, ProvisionVersion
-from app.modules.answering import service, verification
+from app.modules.answering import claims, service, verification
+from app.modules.answering.evidence import evidence_display
 from app.modules.evaluation import scoring
 
 NO_ANSWER = "（未评测：模型不可用）"
@@ -174,8 +175,8 @@ def _markdown(payload: dict) -> str:
         "",
         "## 逐条",
         "",
-        "| 用例 | 类别 | 引用召回 | 关键要素 | 凭空引用 | 禁项 | 拒答 | 耗时 |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| 用例 | 类别 | 引用召回 | 关键要素 | 引用编号 | 凭空引用 | 禁项 | 拒答 | 耗时 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for record in payload["records"]:
         recall = "—" if record["citation_recall"] is None else f"{record['citation_recall']:.2f}"
@@ -183,9 +184,10 @@ def _markdown(payload: dict) -> str:
         unwarranted = ", ".join(record["unwarranted_citations"]) or "—"
         forbidden = ", ".join(record["forbidden_hits"]) or "—"
         abstain = "对" if record["abstain_correct"] else "**错**"
+        cited = ", ".join(record.get("cited_evidence_ids") or []) or "—"
         lines.append(
-            f"| {record['id']} | {record['category']} | {recall} | {facts} | {unwarranted} | "
-            f"{forbidden} | {abstain} | {record['seconds']:.1f}s |"
+            f"| {record['id']} | {record['category']} | {recall} | {facts} | {cited} | "
+            f"{unwarranted} | {forbidden} | {abstain} | {record['seconds']:.1f}s |"
         )
 
     lines += ["", "## 失败明细", ""]
@@ -226,8 +228,12 @@ def _problems(record: dict) -> list[str]:
             issues.append(f"缺关键要素：{record['missing_facts']}")
     if record["unwarranted_citations"]:
         issues.append(f"凭空引用：{record['unwarranted_citations']}")
+    if record.get("unwarranted_evidence_ids"):
+        issues.append(f"引用了不存在的证据编号：{record['unwarranted_evidence_ids']}")
     if record["forbidden_hits"]:
         issues.append(f"说了干扰条款的规则：{record['forbidden_hits']}")
+    if record.get("format_ok") is False:
+        issues.append(f"没有按 §9.2 输出结构化结果：{record.get('format_error')}")
     return issues
 
 
@@ -243,6 +249,8 @@ def _diagnostics(record: dict) -> list[str]:
         notes.append("模型未主动提示依据未生效（回答层会强制提示，见 §8.3）")
     if record.get("verification_ok") is False:
         notes.append(f"§9.3 第一层门禁会拦下这条：{record['verification_issues']}")
+    if record.get("repaired"):
+        notes.append("模型输出需要容错修复才能解析（多段 JSON 并列）")
     return notes
 
 
@@ -299,19 +307,38 @@ async def run(args) -> int:
     for case in cases:
         pins, evidence = _evidence_items(case, corpus)
         started = time.perf_counter()
-        answer = generation.generate(
+        raw = generation.generate(
             model_name,
             service.build_messages(pins, case["question"]),
             max_new_tokens=args.max_new_tokens,
+            schema=claims.SCHEMA,
         )
         seconds = time.perf_counter() - started
-        record = scoring.score_case(case, answer, evidence)
-        # §9.3 第一层的核验也跑一遍：门禁在这批答案上会不会响，是要看的事实（诊断项）
-        verified = verification.verify(answer, case["question"], pins)
-        record["verification_ok"] = verified.ok
-        record["verification_issues"] = [issue.detail for issue in verified.issues]
+        # §9.2：模型给的是「主张 + 证据编号」，所以打分与核验都对着结构，不再从自由文本里猜引用
+        parsed = claims.parse(raw)
+        if parsed.ok:
+            record = scoring.score_case(
+                case,
+                "\n".join(claim.text for claim in parsed.answer.claims),
+                evidence,
+                cited_evidence_ids=parsed.answer.cited_evidence_ids,
+                abstained=parsed.answer.abstained,
+            )
+            record["answer"] = claims.render(parsed.answer, evidence_display(pins))
+            verified = verification.verify_claims(parsed.answer, case["question"], pins)
+            record["verification_ok"] = verified.ok
+            record["verification_issues"] = [issue.detail for issue in verified.issues]
+        else:
+            # 解析都失败就无从核验——把 `verification_ok` 留空，别污染门禁触发率
+            record = scoring.score_case(case, raw, evidence, cited_evidence_ids=(), abstained=False)
+            record["answer"] = raw
+            record["verification_ok"] = None
+            record["verification_issues"] = []
+        record["format_ok"] = parsed.ok
+        record["repaired"] = parsed.repaired
+        record["format_error"] = parsed.error
+        record["cited_evidence_ids"] = list(parsed.answer.cited_evidence_ids) if parsed.ok else []
         record["question"] = case["question"]
-        record["answer"] = answer
         record["seconds"] = seconds
         record["note"] = case.get("note")
         record["problems"] = _problems(record)

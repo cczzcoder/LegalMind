@@ -6,12 +6,12 @@
 
 v0.1.0：本地开发基础版，不可直接用于生产。
 
-当前实现覆盖设计实施阶段 P0–P2，P3 已开始：需求阶段 A 已完成；阶段 B 的 P2（认证授权、文件存储、备份恢复）已完成；P3 的数据模型已完整建立（原文定位 0007、法律版本树 0008、条款关系与适用性 0009），**第 1 层解析器、法律结构识别、后台 worker、法律版本落库与精确字段检索已实现**（`app/modules/parsing/` 解析结果经入库前脱敏后写入 `parse_revisions` / `chunks` / `chunk_spans`；`app/modules/legal_corpus/` 识别 编/章/节/条、对齐分块并挂到 `legal_instruments` / `legal_versions` / `provision_identities` / `provision_versions`；`app/workers/` 消费 `document.parse` 任务；`app/modules/retrieval/` 提供 `POST /api/v1/search`，`app/modules/legal_corpus/quality.py` + `backend/scripts/quality_gate.py` 提供只读入库质量门禁），"导入 → 解析 → 挂版本 → 查得到"已闭环；**中文关键词检索已实现**（V1.12，方案经金标准选型）；**向量检索已接线**（V1.13，`semantic` 字段走级联：先关键词、命中为空才向量兜底）、**图谱引用边已落库**（V1.14，`app.cli extract-citations`，只作上下文不进排序）；**AI 问答与核验（P6）、Wiki 审核发布（P5）尚未实现**；阶段 C 未开始。进度口径见《系统设计文档》17.2。
+当前实现覆盖设计实施阶段 P0–P5，P6 已开始：需求阶段 A 已完成；阶段 B 的 P2（认证授权、文件存储、备份恢复）已完成；P3 的数据模型已完整建立（原文定位 0007、法律版本树 0008、条款关系与适用性 0009），**第 1 层解析器、法律结构识别、后台 worker、法律版本落库与精确字段检索已实现**（`app/modules/parsing/` 解析结果经入库前脱敏后写入 `parse_revisions` / `chunks` / `chunk_spans`；`app/modules/legal_corpus/` 识别 编/章/节/条、对齐分块并挂到 `legal_instruments` / `legal_versions` / `provision_identities` / `provision_versions`；`app/workers/` 消费 `document.parse` 任务；`app/modules/retrieval/` 提供 `POST /api/v1/search`，`app/modules/legal_corpus/quality.py` + `backend/scripts/quality_gate.py` 提供只读入库质量门禁），"导入 → 解析 → 挂版本 → 查得到"已闭环；**中文关键词检索已实现**（V1.12，方案经金标准选型）；**向量检索已接线**（V1.13，`semantic` 字段走级联：先关键词、命中为空才向量兜底）、**图谱引用边已落库**（V1.14，`app.cli extract-citations`，只作上下文不进排序）；**Wiki 审核发布与更新提醒已实现**（V1.15 / V1.16，迁移 0016 / 0017）；**P6 架构锁定为本地模型、默认关闭外部 API**（V1.17，§9.5），并打通了最小可用的证据约束问答（`app.cli ask`），**生成质量评测已建立**（V1.18：金标准 22 条 + `backend/scripts/evaluate_answering.py`，**首次实跑 7 项指标 6 项达标、效力状态提示率为 0，未过 §9.5 的达标关**）；**P6 的编排、引用校验、语义核验、拒答策略、异步 answer-run 尚未实现**；阶段 C 未开始。进度口径见《系统设计文档》17.2。
 
 ## 已实现
 
 - FastAPI + PostgreSQL + SQLAlchemy
-- Alembic 迁移（0001 Wiki/审计/Outbox，0002 身份与会话，0003 MFA 与页面授权，0004 来源/原件/任务，0005 审计索引，0006 业务表外键，0007 解析版本/分块/原文定位，0008 法律版本/条款，0009 条款关系/适用性，0010 公共数据表去组织字段，0011 来源/原件/任务去组织字段，0012 脱敏映射表，0013 版本效力状态与本体身份键，0014 文号规范化字段与索引，0015 向量扩展与条款向量表）
+- Alembic 迁移（0001 Wiki/审计/Outbox，0002 身份与会话，0003 MFA 与页面授权，0004 来源/原件/任务，0005 审计索引，0006 业务表外键，0007 解析版本/分块/原文定位，0008 法律版本/条款，0009 条款关系/适用性，0010 公共数据表去组织字段，0011 来源/原件/任务去组织字段，0012 脱敏映射表，0013 版本效力状态与本体身份键，0014 文号规范化字段与索引，0015 向量扩展与条款向量表，0016 Wiki 审核发布状态机与修订引用，0017 引用正文快照与待复核标记）
 - React 登录页、MFA 绑定/验证与 Wiki 草稿界面
 - Wiki 修订历史与并发冲突检测
 - 用户名密码登录（Argon2id）、PostgreSQL 服务端会话、CSRF 防护
@@ -35,6 +35,9 @@ v0.1.0：本地开发基础版，不可直接用于生产。
 - 精确字段检索（设计 8.1、8.3、13）：`POST /api/v1/search` 按规范化名称 / 文号 / 稳定 ID / 条号精确匹配，叠加法域、资料类型、效力日期、效力状态与授权过滤；**默认屏蔽「已公布未生效」**，审核状态不过滤但始终回传；授权在数据库中复核（join 原件 + 授权范围）。写入与检索共用同一套规范化口径（迁移 0014 新增 `legal_instruments.document_number_normalized`）。**中文关键词（V1.12）、查询改写（V1.13）、向量级联（V1.13）与图谱引用边（V1.14）见下条**
 - 中文关键词检索（设计 8.2、8.3）：`POST /api/v1/search` 的 `keyword` 与精确字段、过滤条件 **AND 叠加**；方案**先建金标准再选型**（`evaluations/datasets/retrieval_queries.json` 28 条查询，`backend/scripts/evaluate_retrieval.py` 横向比 5 个候选），选中「去空白 + 多词 AND」（Recall 1.0 / 准确率 1.0）。**不引入 Elasticsearch、不建索引**；⚠️ PDF 文本的折行空格（实测「民用航 空器」）不处理会丢一半召回
 - 入库质量门禁（设计 7、17.1、20.3）：`app/modules/legal_corpus/quality.py` + `backend/scripts/quality_gate.py` **只读**校验来源登记、元数据与解析质量，判 `passed` / `degraded` / `failed`（来源/授权说明/解析产物/挂版本等硬要求不过即 `failed`，降级待审判 `degraded`）；报告落 `evaluations/reports/`，门禁不通过时退出码非零。**只校验、不阻断**
+- Wiki 审核发布与更新提醒（设计 10.2、10.3）：修订走 草稿 → 提交 → 发布/驳回 状态机，提交即锁定；**发布前做引用检查**（至少一条引用，且审核人能访问每条引用的原件）；**作者不能审自己的修订**；引用了读者无权访问的原件时**整页不可见**。`app.cli flag-stale-pages` 检测「依据被取代」与「引用正文已变更」并标记待复核（**只标记、不动正文**，重新发布清标），`GET /api/v1/wiki/pages/stale` 暴露列表
+- 本地模型的证据约束问答（设计 9.5，P6 第一刀）：`app/modules/answering/` + `python -m app.cli ask`——检索 → **只把命中的条文原文交给模型** → 生成 → 引用取**检索命中的条款版本**（不是模型写的条号，因此可核验）；**没有依据就拒答且不调用模型**；**模型不可用时如实降级成「只给证据 + 转人工」，不回落任何外部服务**
+- 生成质量评测（设计 9.5「本地生成模型单独评测，达标后再接入正式问答」）：金标准 `evaluations/datasets/generation_quality.json`（22 条，**证据钉住、绕过检索**，只量生成）+ `backend/scripts/evaluate_answering.py`（`--check-only` 只校验、`--gate` 未达标退非零）+ 纯打分 `app/modules/evaluation/scoring.py`。7 项确定性指标（引用召回 / 凭空引用 / 关键要素覆盖 / 禁项触犯 / 拒答正确 / 过度拒答 / 效力状态提示），温度 0 可复现。**首次实跑 6 项达标、`status_flag_rate` 为 0**：模型不理会证据里的「尚未生效」标注——故**效力状态提示须由回答层强制**
 - 解析内存防护（设计 14.2）：逐页处理并及时释放，字节/页数/字符数硬上限 + 进程内存增长守卫，超限主动中止
 - 业务表统一外键（设计 5.3）：organization_id 与"人"引用列（created_by / author_id / granted_by / actor_id），ondelete 一律 RESTRICT
 - 前端静态检查：eslint + prettier（`npm run lint` / `npm run format:check`）
@@ -43,11 +46,11 @@ v0.1.0：本地开发基础版，不可直接用于生产。
 ## 未实现
 
 - 来源登记、文件导入下载与授权名单的前端管理界面（目前均通过 API）
-- Wiki 审核及发布
+- Wiki 审核发布的**前端入口**（后端与 API 已实现）
 - 法律版本的人工复核界面与待审队列（落库已实现，`review_status='pending'` 目前只能用 SQL 查）
 - 版本效力状态的定期重算（「已公布未生效」到期转有效、旧版本随之被取代，目前只在落库时算一次）
 - OCR（第 2 层）与结构化版面（第 3 层 Docling，暂缓）
-- AI 问答与核验（P6）、Wiki 审核发布（P5）；精确字段、中文关键词、向量（级联）与图谱引用边（仅作上下文）已实现
+- **P6 的编排、引用校验、语义核验、拒答策略、异步 answer-run**（本地模型、证据约束问答与生成质量评测已实现；**生成评测未达标，故不接入正式问答**）
 - Outbox 消费、审计防篡改
 
 ## 启动
@@ -155,6 +158,7 @@ CI（`.github/workflows/ci.yml`）在 push 与 PR 上跑同一套门禁。
 - 检索实现了精确字段、中文关键词与向量（级联）通路（设计 §8.2、§8.3），图谱引用边只作上下文、不进排序；检索默认屏蔽 `not_yet_effective`（不得把尚未生效的法律当作现行依据）；审核状态（`pending`）**不过滤但始终回传**——它是数据质量标记、不是效力事实。日期未知的版本保留并在结果里显示 `unknown`。
 - 关键词选型结论只在**当前 28 条金标准、这份语料**上成立：语料规模或来源变化后应重跑 `backend/scripts/evaluate_retrieval.py`。它衡量的是**词面命中**，不是语义召回——语义召回由向量通路承担（同一份语料另建了问句式 24 条与简称 12 条两份金标准）。关键词通路当前未建索引（顺序扫描 21 ms/查询）；向量通路无 ANN 索引（不定长 `vector` 列建不了），2403 条顺序扫描 30 ms。
 - 入库质量门禁只校验、不阻断：当前语料 15 passed / 4 degraded / 1 failed；`failed` 的是纯图像扫描件的宪法 PDF（解析 0 字符、挂不上版本树，OCR 未实现）。
+- 生成质量评测**只量确定性指标**（引用、关键要素、拒答、效力状态提示），不评语义忠实性——那需要语义裁判，而 §9.5 锁定本地模型、不引入外部服务。**22 条用例、单一语料、单一模型**，结论只在这份语料与这个模型上成立；它**绕过检索**，因此测不到「检索给错证据时模型会不会照样答」。当前**未达标**（效力状态提示率 0），按 §9.5 不接入正式问答；语料或模型换了要重跑 `backend/scripts/evaluate_answering.py`。
 - 不应将包含敏感内容的 .env、数据库或原始文件提交仓库。
 
 ## 依赖

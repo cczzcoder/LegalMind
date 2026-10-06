@@ -1,0 +1,641 @@
+{
+  "version": 1,
+  "built_on": "2026-10-06",
+  "corpus": "法律文献/ 20 份样本语料（13 本体 / 2403 条款版本）",
+  "purpose": "设计 §9.5「本地生成模型单独评测，达标后再接入正式问答」——在接入正式问答（LangGraph 编排、引用校验、语义核验、拒答策略、异步 answer-run）之前，先把生成模型本身量出来。",
+  "revision_note": "v1 首次实跑（2026-10-06，Qwen2.5-7B）后按「期望是否真的必要」复核过一遍：g09 原本还要求答案说出「不得擅自携带、传递审计工作底稿」，但问题只问「存放在哪里」——**期望超出问题范围，已删**；g10 的问题改为同时问「体系」与「人员」，否则「配备药学技术人员」同样是超范围要求；其余 required_facts 统一改成**承载要点的关键短语**而不是整句条款原文——要求逐字复述会把「正确改写」判成没覆盖（实测 g12 模型写「应当使用国家通用语言文字」，被判没覆盖整句「应当以国家通用语言文字为基本的用语用字」）。**这是复核期望本身的合理性，不是照着模型得分调阈值。**",
+  "design": {
+    "evidence_is_pinned": "每条用例**显式给出要喂给模型的条款**（法, 条），评测时绕过检索。这样量到的只有生成质量，不掺检索质量——检索另有三份金标准。",
+    "expectations_are_derived": "期望引用 = 真正回答该问题的条款（与证据中的干扰条款区分开）；required_facts 与 forbidden_facts **一律取自条款正文**，评测脚本会核对它们确实是正文的去空白子串（PDF 折行空格，实测「民用航 空器」）。所以期望不是手写的参考答案，是可复核的事实。",
+    "required_facts_are_key_terms": "required_facts 是**承载要点的关键短语**（大致 4–14 字），不是整句条款原文，而且**只收问题真正在问的要素**。要求逐字复述条款会把正确改写判成没覆盖；要求问题没问的要素则是在考模型猜出题人的心思——两者都会让指标失真。",
+    "forbidden_facts_are_traps": "每条 forbidden_fact 必须真的出现在某条**证据**里、且不出现在**期望条款**里——即「看起来相关、其实答的是另一回事」的干扰条款的规则。模型把它当成答案说出来，就是张冠李戴。",
+    "scoring": "确定性指标，不用语义裁判（§9.5 锁定本地模型、不引入外部服务）：引用召回、凭空引用、关键要素覆盖、禁项触犯、拒答正确性、效力状态提示。见 app/modules/evaluation/scoring.py。",
+    "determinism": "生成温度固定为 0（贪心解码），同一份数据重复跑应得到同一份结果。"
+  },
+  "categories": {
+    "grounded": "单条依据即可回答，证据里混入 1–2 条同法域、词汇相近的干扰条款",
+    "multi": "需要两条以上依据合并回答",
+    "status": "证据的效力状态不是「现行有效」（如尚未生效），答案必须提示，不得当作现行依据（§8.3、§9.5）",
+    "abstain": "不该回答：no_evidence（证据为空）或 irrelevant（证据与问题无关）——测「只依据给定条文」这条约束守不守得住"
+  },
+  "thresholds": {
+    "citation_recall": 0.9,
+    "no_fabrication_rate": 0.95,
+    "fact_coverage": 0.8,
+    "forbidden_rate": 0.1,
+    "abstain_accuracy": 1.0,
+    "over_abstain_rate": 0.15,
+    "status_flag_rate": 0.8
+  },
+  "thresholds_note": "「达标」= citation_recall / no_fabrication_rate / fact_coverage / abstain_accuracy / status_flag_rate 不低于阈值，forbidden_rate / over_abstain_rate 不高于阈值。阈值按**产品需要**定，不是照模型得分反推：拒答是硬要求（abstain_accuracy=1.0），凭空引用几乎不可接受（0.95），而过度拒答虽不好但比编造安全，故留 0.15 的余地（18 条非拒答用例里允许 2 条）。未达标是评测要报告的事实，不是脚本断言。",
+  "cases": [
+    {
+      "id": "g01",
+      "category": "grounded",
+      "question": "工资能不能用实物代替货币发放？",
+      "evidence": [
+        [
+          "中华人民共和国劳动法",
+          "50"
+        ],
+        [
+          "中华人民共和国劳动法",
+          "48"
+        ],
+        [
+          "中华人民共和国劳动法",
+          "46"
+        ]
+      ],
+      "expect_citations": [
+        [
+          "中华人民共和国劳动法",
+          "50"
+        ]
+      ],
+      "required_facts": [
+        "以货币形式按月支付",
+        "无故拖欠"
+      ],
+      "forbidden_facts": [
+        "最低工资标准"
+      ],
+      "status_flag_required": false,
+      "note": "干扰：48 也谈工资（最低工资），46 谈按劳分配——都不是「工资的支付形式」"
+    },
+    {
+      "id": "g02",
+      "category": "grounded",
+      "question": "用人单位无故不缴纳社会保险费，会被怎么处理？",
+      "evidence": [
+        [
+          "中华人民共和国劳动法",
+          "100"
+        ],
+        [
+          "中华人民共和国劳动法",
+          "91"
+        ]
+      ],
+      "expect_citations": [
+        [
+          "中华人民共和国劳动法",
+          "100"
+        ]
+      ],
+      "required_facts": [
+        "责令其限期缴纳",
+        "加收滞纳金"
+      ],
+      "forbidden_facts": [
+        "经济补偿"
+      ],
+      "status_flag_required": false,
+      "note": "干扰：91 是「克扣/拖欠工资」的处理（责令支付工资报酬、经济补偿、赔偿金）"
+    },
+    {
+      "id": "g03",
+      "category": "grounded",
+      "question": "用人单位克扣或者无故拖欠劳动者工资的，劳动行政部门可以怎么处理？",
+      "evidence": [
+        [
+          "中华人民共和国劳动法",
+          "91"
+        ],
+        [
+          "中华人民共和国劳动法",
+          "50"
+        ]
+      ],
+      "expect_citations": [
+        [
+          "中华人民共和国劳动法",
+          "91"
+        ]
+      ],
+      "required_facts": [
+        "责令支付劳动者的工资报酬",
+        "赔偿金"
+      ],
+      "forbidden_facts": [
+        "按月支付"
+      ],
+      "status_flag_required": false,
+      "note": "与 g02 互为镜像：同一个法里两条处理条款，问的是哪一条就得答哪一条"
+    },
+    {
+      "id": "g04",
+      "category": "grounded",
+      "question": "空中交通管制单位发现民用航空器偏离指定航路、迷失航向时，应当怎么做？",
+      "evidence": [
+        [
+          "中华人民共和国民用航空法",
+          "87"
+        ],
+        [
+          "中华人民共和国民用航空法",
+          "86"
+        ]
+      ],
+      "expect_citations": [
+        [
+          "中华人民共和国民用航空法",
+          "87"
+        ]
+      ],
+      "required_facts": [
+        "空中交通管制单位",
+        "使其回归航路"
+      ],
+      "forbidden_facts": [
+        "飞行情报服务"
+      ],
+      "status_flag_required": false,
+      "note": "干扰：86 也以「空中交通管制单位」开头，但讲的是服务分工"
+    },
+    {
+      "id": "g05",
+      "category": "grounded",
+      "question": "飞行中机长因故不能履行职务，由谁代理？之后由谁接任？",
+      "evidence": [
+        [
+          "中华人民共和国民用航空法",
+          "50"
+        ],
+        [
+          "中华人民共和国民用航空法",
+          "49"
+        ]
+      ],
+      "expect_citations": [
+        [
+          "中华人民共和国民用航空法",
+          "50"
+        ]
+      ],
+      "required_facts": [
+        "仅次于机长职务的驾驶员",
+        "指派新机长接任"
+      ],
+      "forbidden_facts": [
+        "遇险信号"
+      ],
+      "status_flag_required": false,
+      "note": "干扰：49 也以「机长」开头，讲的是遇险救援"
+    },
+    {
+      "id": "g06",
+      "category": "grounded",
+      "question": "中华人民共和国的行政区域是怎么划分的？",
+      "evidence": [
+        [
+          "中华人民共和国宪法",
+          "30"
+        ],
+        [
+          "中华人民共和国宪法",
+          "31"
+        ]
+      ],
+      "expect_citations": [
+        [
+          "中华人民共和国宪法",
+          "30"
+        ]
+      ],
+      "required_facts": [
+        "全国分为省、自治区、直辖市",
+        "乡、民族乡、镇"
+      ],
+      "forbidden_facts": [
+        "特别行政区"
+      ],
+      "status_flag_required": false,
+      "note": "干扰：31 也谈「行政区」，但讲的是特别行政区"
+    },
+    {
+      "id": "g07",
+      "category": "grounded",
+      "question": "需要急救但身份不明、无力支付急救费用的急危重伤病患者，由谁给予什么救助？",
+      "evidence": [
+        [
+          "中华人民共和国社会救助法",
+          "30"
+        ],
+        [
+          "中华人民共和国社会救助法",
+          "31"
+        ]
+      ],
+      "expect_citations": [
+        [
+          "中华人民共和国社会救助法",
+          "30"
+        ]
+      ],
+      "required_facts": [
+        "社会救助管理部门",
+        "疾病应急救助"
+      ],
+      "forbidden_facts": [
+        "协助返回"
+      ],
+      "status_flag_required": false,
+      "note": "干扰：31 也是「由社会救助管理部门给予……救助」，但对象是生活无着的流散人员"
+    },
+    {
+      "id": "g08",
+      "category": "grounded",
+      "question": "矿业权转让后，受让人还要不要重新申请许可证？",
+      "evidence": [
+        [
+          "中华人民共和国矿产资源法实施条例",
+          "30"
+        ],
+        [
+          "中华人民共和国矿产资源法实施条例",
+          "29"
+        ]
+      ],
+      "expect_citations": [
+        [
+          "中华人民共和国矿产资源法实施条例",
+          "30"
+        ]
+      ],
+      "required_facts": [
+        "受让人",
+        "重新申请勘查许可证"
+      ],
+      "forbidden_facts": [
+        "15个工作日"
+      ],
+      "status_flag_required": false,
+      "note": "干扰：29 讲「申请勘查许可证、采矿许可证」的材料与期限，词汇高度重合"
+    },
+    {
+      "id": "g09",
+      "category": "grounded",
+      "question": "注册会计师执行审计业务形成的审计工作底稿，应当存放在哪里？",
+      "evidence": [
+        [
+          "中华人民共和国注册会计师法",
+          "45"
+        ],
+        [
+          "中华人民共和国注册会计师法",
+          "44"
+        ]
+      ],
+      "expect_citations": [
+        [
+          "中华人民共和国注册会计师法",
+          "45"
+        ]
+      ],
+      "required_facts": [
+        "存放在中国境内"
+      ],
+      "forbidden_facts": [
+        "监管谈话"
+      ],
+      "status_flag_required": false,
+      "note": "干扰：44 讲财政部门对会计师事务所、注册会计师的监管措施。问题只问「存放在哪里」，故不要求答案覆盖出境限制"
+    },
+    {
+      "id": "g10",
+      "category": "grounded",
+      "question": "药品网络交易第三方平台提供者应当建立什么质量管理体系、配备什么人员？",
+      "evidence": [
+        [
+          "中华人民共和国药品管理法实施条例",
+          "45"
+        ],
+        [
+          "中华人民共和国药品管理法实施条例",
+          "44"
+        ]
+      ],
+      "expect_citations": [
+        [
+          "中华人民共和国药品管理法实施条例",
+          "45"
+        ]
+      ],
+      "required_facts": [
+        "药品网络销售质量管理体系",
+        "药学技术人员"
+      ],
+      "forbidden_facts": [
+        "储存、运输药品"
+      ],
+      "status_flag_required": false,
+      "note": "干扰：44 讲药品储存运输的质量管理，同样出现「药品质量」"
+    },
+    {
+      "id": "g11",
+      "category": "grounded",
+      "question": "国家发展规划实施到中期阶段，国务院应当做什么？",
+      "evidence": [
+        [
+          "中华人民共和国国家发展规划法",
+          "30"
+        ],
+        [
+          "中华人民共和国国家发展规划法",
+          "29"
+        ]
+      ],
+      "expect_citations": [
+        [
+          "中华人民共和国国家发展规划法",
+          "30"
+        ]
+      ],
+      "required_facts": [
+        "中期评估",
+        "国务院"
+      ],
+      "forbidden_facts": [
+        "承担国家发展规划实施监督的具体工作"
+      ],
+      "status_flag_required": false,
+      "note": "干扰：29 讲人大对规划实施的监督，同样出现「国家发展规划实施」"
+    },
+    {
+      "id": "g12",
+      "category": "grounded",
+      "question": "广播、电影、电视的用语用字有什么要求？",
+      "evidence": [
+        [
+          "中华人民共和国国家通用语言文字法",
+          "15"
+        ],
+        [
+          "中华人民共和国国家通用语言文字法",
+          "14"
+        ]
+      ],
+      "expect_citations": [
+        [
+          "中华人民共和国国家通用语言文字法",
+          "15"
+        ]
+      ],
+      "required_facts": [
+        "国家通用语言文字",
+        "广播、电影、电视"
+      ],
+      "forbidden_facts": [
+        "公共服务行业以规范汉字为基本的服务用字"
+      ],
+      "status_flag_required": false,
+      "note": "干扰：14 讲公共服务行业的服务用字，同样出现「招牌、广告」这类列举"
+    },
+    {
+      "id": "g13",
+      "category": "grounded",
+      "question": "铸牢中华民族共同体意识，应当引导各族人民牢固树立什么理念？",
+      "evidence": [
+        [
+          "中华人民共和国民族团结进步促进法",
+          "3"
+        ],
+        [
+          "中华人民共和国民族团结进步促进法",
+          "4"
+        ]
+      ],
+      "expect_citations": [
+        [
+          "中华人民共和国民族团结进步促进法",
+          "3"
+        ]
+      ],
+      "required_facts": [
+        "休戚与共",
+        "共同体理念"
+      ],
+      "forbidden_facts": [
+        "统筹经济、政治、文化、社会和生态文明建设"
+      ],
+      "status_flag_required": false,
+      "note": "干扰：4 也讲「中华民族共同体」，但讲的是建设布局"
+    },
+    {
+      "id": "m01",
+      "category": "multi",
+      "question": "监狱提请减刑、假释建议，要经过哪些程序？",
+      "evidence": [
+        [
+          "中华人民共和国监狱法",
+          "50"
+        ],
+        [
+          "中华人民共和国监狱法",
+          "51"
+        ],
+        [
+          "中华人民共和国监狱法",
+          "29"
+        ]
+      ],
+      "expect_citations": [
+        [
+          "中华人民共和国监狱法",
+          "50"
+        ],
+        [
+          "中华人民共和国监狱法",
+          "51"
+        ]
+      ],
+      "required_facts": [
+        "监狱减刑假释评审委员会",
+        "省、自治区、直辖市监狱管理机关"
+      ],
+      "forbidden_facts": [],
+      "status_flag_required": true,
+      "note": "需要 50（监狱内评审）与 51（报监狱管理机关审核）两条合并；证据未生效，须提示"
+    },
+    {
+      "id": "m02",
+      "category": "multi",
+      "question": "急危重伤病患者和生活无着的流散人员，分别由谁给予什么救助？",
+      "evidence": [
+        [
+          "中华人民共和国社会救助法",
+          "30"
+        ],
+        [
+          "中华人民共和国社会救助法",
+          "31"
+        ],
+        [
+          "中华人民共和国社会救助法",
+          "15"
+        ]
+      ],
+      "expect_citations": [
+        [
+          "中华人民共和国社会救助法",
+          "30"
+        ],
+        [
+          "中华人民共和国社会救助法",
+          "31"
+        ]
+      ],
+      "required_facts": [
+        "疾病应急救助",
+        "照料服务"
+      ],
+      "forbidden_facts": [
+        "专项社会救助包括医疗救助"
+      ],
+      "status_flag_required": false,
+      "note": "两类对象分别在 30 与 31；干扰 15 只给了救助分类，没回答「谁给」"
+    },
+    {
+      "id": "st01",
+      "category": "status",
+      "question": "监狱属于什么性质的国家机关？",
+      "evidence": [
+        [
+          "中华人民共和国监狱法",
+          "2"
+        ]
+      ],
+      "expect_citations": [
+        [
+          "中华人民共和国监狱法",
+          "2"
+        ]
+      ],
+      "required_facts": [
+        "刑罚执行机关"
+      ],
+      "forbidden_facts": [],
+      "status_flag_required": true,
+      "note": "该版本 legal_status=not_yet_effective，答案必须提示未生效，不得当作现行依据"
+    },
+    {
+      "id": "st02",
+      "category": "status",
+      "question": "哪些标志不得作为商标注册和使用？",
+      "evidence": [
+        [
+          "中华人民共和国商标法",
+          "15"
+        ],
+        [
+          "中华人民共和国商标法",
+          "10"
+        ]
+      ],
+      "expect_citations": [
+        [
+          "中华人民共和国商标法",
+          "15"
+        ]
+      ],
+      "required_facts": [
+        "不得作为商标注册和使用",
+        "带有民族歧视性"
+      ],
+      "forbidden_facts": [
+        "委托依法设立的商标代理机构办理"
+      ],
+      "status_flag_required": true,
+      "note": "该版本 legal_status=not_yet_effective；干扰 10 讲的是商标申请的办理方式"
+    },
+    {
+      "id": "a01",
+      "category": "abstain",
+      "abstain_kind": "no_evidence",
+      "question": "有限责任公司股东人数上限是多少？",
+      "evidence": [],
+      "expect_citations": [],
+      "required_facts": [],
+      "forbidden_facts": [],
+      "status_flag_required": false,
+      "expect_abstain": true,
+      "note": "公司法不在语料里；空证据下不该调用模型，更不该凭空作答"
+    },
+    {
+      "id": "a02",
+      "category": "abstain",
+      "abstain_kind": "no_evidence",
+      "question": "机动车发生交通事故造成人身伤亡的，赔偿责任怎么划分？",
+      "evidence": [],
+      "expect_citations": [],
+      "required_facts": [],
+      "forbidden_facts": [],
+      "status_flag_required": false,
+      "expect_abstain": true,
+      "note": "道路交通安全法不在语料里"
+    },
+    {
+      "id": "a03",
+      "category": "abstain",
+      "abstain_kind": "irrelevant",
+      "question": "民间借贷的利率司法保护上限是多少？",
+      "evidence": [
+        [
+          "中华人民共和国宪法",
+          "30"
+        ],
+        [
+          "中华人民共和国商标法",
+          "6"
+        ]
+      ],
+      "expect_citations": [],
+      "required_facts": [],
+      "forbidden_facts": [],
+      "status_flag_required": false,
+      "expect_abstain": true,
+      "note": "证据（行政区划、集体商标定义）与问题无关"
+    },
+    {
+      "id": "a04",
+      "category": "abstain",
+      "abstain_kind": "irrelevant",
+      "question": "劳动合同应当具备哪些必备条款？",
+      "evidence": [
+        [
+          "中华人民共和国民用航空法",
+          "50"
+        ],
+        [
+          "中华人民共和国国家通用语言文字法",
+          "15"
+        ]
+      ],
+      "expect_citations": [],
+      "required_facts": [],
+      "forbidden_facts": [],
+      "status_flag_required": false,
+      "expect_abstain": true,
+      "note": "劳动合同必备条款在劳动法里（语料内有），但**不在本次证据里**——测模型会不会用条文以外的知识"
+    },
+    {
+      "id": "a05",
+      "category": "abstain",
+      "abstain_kind": "irrelevant",
+      "question": "宪法规定我国的根本政治制度是什么？",
+      "evidence": [
+        [
+          "中华人民共和国民用航空法",
+          "50"
+        ]
+      ],
+      "expect_citations": [],
+      "required_facts": [],
+      "forbidden_facts": [],
+      "status_flag_required": false,
+      "expect_abstain": true,
+      "note": "典型参数化记忆泄漏：答案（人民代表大会制度）广为人知且语料内有宪法，但证据里只有民航法——测「只依据给定条文」守不守得住"
+    }
+  ]
+}

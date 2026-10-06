@@ -89,6 +89,21 @@ def build_evidence(hits) -> str:
     return "\n\n".join(blocks)
 
 
+def build_messages(hits, question: str) -> list[dict]:
+    """拼出送进本地模型的对话消息。
+
+    **单独抽出来是为了让评测与线上用同一条提示词**——生成质量评测
+    （`scripts/evaluate_answering.py`，§9.5）要测的就是这条提示词加这个模型，
+    如果评测另写一份提示，测出来的东西就不是线上跑的东西了。
+    """
+    return [
+        {
+            "role": "user",
+            "content": f"{INSTRUCTIONS}\n\n条文原文：\n\n{build_evidence(hits)}\n\n问题：{question}",
+        },
+    ]
+
+
 async def answer_question(
     session: AsyncSession,
     principal: Principal,
@@ -138,12 +153,7 @@ async def answer_question(
             seconds=perf_counter() - started,
         )
 
-    messages = [
-        {
-            "role": "user",
-            "content": f"{INSTRUCTIONS}\n\n条文原文：\n\n{build_evidence(hits)}\n\n问题：{question}",
-        },
-    ]
+    messages = build_messages(hits, question)
     text = generation.generate(model_name, messages, max_new_tokens=max_new_tokens)
     return Answer(
         question=question,

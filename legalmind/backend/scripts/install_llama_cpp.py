@@ -1,8 +1,12 @@
 """在本机编译安装 llama-cpp-python（Windows）。
 
+⚠️ **当前不用它**：P6 的推理运行时已定为 **Ollama**（`ops/Modelfile.qwen2.5-7b`），本机也编不了
+（见下）。这个脚本留着，是因为「安全策略放行 `reg.exe`」之后它仍是最直接的一条路。
+
 **为什么需要这个脚本**：本机拿不到 ``llama-cpp-python`` 的预编译 wheel——PyPI 上只有源码包，
 解压会撞 Windows 260 字符路径上限；官方 wheel 索引可达但 wheel 本体托管在 **GitHub releases**，
-本机不可达（502）。好在 VS 2022 Community 的 MSVC 与 CMake 都在，所以自己编。
+本机不可达（502）。好在 VS 2022 Community 的 MSVC 与 CMake 都在，所以可以自己编——**但**
+``vcvars64.bat`` 内部要调 ``reg.exe``，它被本机安全策略明确封禁，所以本脚本在当前环境下**跑不通**。
 
 脚本做两件事：
 

@@ -131,6 +131,7 @@ async def test_answer_returns_the_retrieved_provisions_as_citations(
             document_id,
         )
 
+    monkeypatch.setattr(generation, "available", lambda *_a, **_k: True)
     monkeypatch.setattr(generation, "generate", lambda *_a, **_k: "这是模型生成的答案（测试替身）")
     user = await make_user("reader")
     principal = Principal(

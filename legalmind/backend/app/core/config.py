@@ -49,7 +49,10 @@ class Settings(BaseSettings):
     embedding_model: str = "BAAI/bge-m3"
     # 生成模型（P6）。**只用本地部署的量化权重**——设计 §9.5 的决策是「因合规要求，P6 架构锁定为
     # 本地部署模型，默认关闭任何外部 API 接口」，所以这里没有、也不该有外部服务的配置项。
-    generation_model: str = "Qwen2.5-7B-Instruct-GGUF"
+    # 名称是 Ollama 里的模型名，由 `ops/Modelfile.qwen2.5-7b` 创建。
+    generation_model: str = "legalmind-qwen2.5-7b"
+    # 本地推理运行时（Ollama）地址。**改它也只指向本地**——本项目的生成不走外部服务。
+    ollama_host: str = "http://127.0.0.1:11434"
     # 模型权重下载源。本机 HuggingFace 直连不通，默认走镜像（其元数据 API 403 不影响下载）。
     hf_endpoint: str = "https://hf-mirror.com"
 

@@ -51,6 +51,9 @@ STATUS_LABELS = {
 }
 
 NO_EVIDENCE = "依据不足：没有检索到与问题相关的条文，无法回答。"
+# §9.5「本地模型不满足质量标准时提供证据检索与人工审核，不开放正式自动结论」。
+# **不回落外部服务**——配置缺失就是不可用。
+MODEL_UNAVAILABLE = "本地生成模型不可用，未生成结论。以下是检索到的依据，请人工判读。"
 
 
 @dataclass(frozen=True)
@@ -112,14 +115,6 @@ async def answer_question(
             seconds=perf_counter() - started,
         )
 
-    messages = [
-        {
-            "role": "user",
-            "content": f"{INSTRUCTIONS}\n\n条文原文：\n\n{build_evidence(hits)}\n\n问题：{question}",
-        },
-    ]
-    model_name = model or get_settings().generation_model
-    text = generation.generate(model_name, messages, max_new_tokens=max_new_tokens)
     citations = tuple(
         Citation(
             instrument_title=hit.instrument_title,
@@ -130,6 +125,26 @@ async def answer_question(
         )
         for hit in hits
     )
+
+    model_name = model or get_settings().generation_model
+    if not generation.available(model_name):
+        # **不回落外部服务**：本地模型不可用就如实降级成「只给证据 + 转人工」（§9.5）
+        return Answer(
+            question=question,
+            answer=MODEL_UNAVAILABLE,
+            citations=citations,
+            path=search.path,
+            model=None,
+            seconds=perf_counter() - started,
+        )
+
+    messages = [
+        {
+            "role": "user",
+            "content": f"{INSTRUCTIONS}\n\n条文原文：\n\n{build_evidence(hits)}\n\n问题：{question}",
+        },
+    ]
+    text = generation.generate(model_name, messages, max_new_tokens=max_new_tokens)
     return Answer(
         question=question,
         answer=text,

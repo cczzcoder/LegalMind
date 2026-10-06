@@ -2,23 +2,25 @@
 
 **只走本地模型，且不提供任何外部 API 的回落路径。** §9.5 的决策是「因合规要求，P6 架构锁定为
 本地部署模型，默认关闭任何外部 API 接口」，所以这里**没有**「没配本地模型就调外部服务」这种分支：
-配置缺失就是**不可用**，如实降级成「只给检索证据 + 转人工」，绝不偷偷外发。
+模型不可用就是**不可用**，`available()` 返回 ``False``，由调用方如实降级成「只给检索证据 +
+转人工」，绝不偷偷外发。
 
-**为什么用 transformers 读 GGUF，而不是 llama-cpp-python**：
+**运行时用 Ollama**，权重是 Qwen2.5-7B-Instruct 的 Q4_K_M GGUF。
 
-- ``llama-cpp-python`` 在 PyPI 上只有源码包，Windows 上解压会撞 260 字符路径上限，装上也要 MSVC 编译；
-- 它官方的预编译 wheel 索引（``abetlen.github.io``）可达，但 wheel 本体托管在 **GitHub releases**，
-  本机不可达（502）。
+⚠️ **为什么不直接在 Python 里读 GGUF**：``transformers`` 加载 GGUF 时会把整个模型**反量化成
+fp32**（``gguf.quants.dequantize`` 返回 float32），7B 需要约 28 GB 内存，普通开发机放不下——
+实测 OOM 在「Unable to allocate 259 MiB」。**量化只在磁盘上省空间，加载后不省内存**，这一层
+必须交给真正的量化推理引擎。另一条路 ``llama-cpp-python`` 在本机装不上（源码包撞 Windows 260
+字符路径上限、预编译 wheel 在 GitHub 不可达、自己编译又卡在安全策略封禁 ``reg.exe``），
+两条都在《技术决策与踩坑记录》§5.1 里。
 
-``transformers`` 的 GGUF 支持正好够用：权重**以量化形态驻留**（``GGUFLinear`` 在 forward 里按需
-反量化），不会展开成 fp16 的 14 GB——本机 15 GB 内存放不下展开后的模型。
-
-模型按需加载、用完即释（§9.5 不默认常驻本地生成模型）；本模块用 ``lru_cache`` 缓存，调用方
-决定何时清。
+所以：**权重由本模块下到本地**（`download()`），**由 Ollama 导入并推理**（`ops/Modelfile.qwen2.5-7b`）。
 """
 
+import json
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 
 from app.adapters import hf_mirror
@@ -27,9 +29,14 @@ from app.core.config import get_settings
 
 @dataclass(frozen=True)
 class GenerationModel:
-    """一个可用的本地生成模型。``gguf_file`` 是量化权重文件名。"""
+    """一个可用的本地生成模型。
+
+    ``name`` 是 **Ollama 里的模型名**（由 ``ops/Modelfile.qwen2.5-7b`` 创建）；
+    ``source`` / ``gguf_file`` 是下载权重用的，与推理运行时无关。
+    """
 
     name: str
+    source: str
     gguf_file: str
     quantization: str
     note: str
@@ -37,38 +44,15 @@ class GenerationModel:
 
 MODELS: tuple[GenerationModel, ...] = (
     GenerationModel(
-        name="Qwen2.5-7B-Instruct-GGUF",
+        name="legalmind-qwen2.5-7b",
+        source="bartowski/Qwen2.5-7B-Instruct-GGUF",
         gguf_file="Qwen2.5-7B-Instruct-Q4_K_M.gguf",
         quantization="Q4_K_M",
-        note="Qwen2.5-7B-Instruct 的 Q4_K_M 量化，约 4.4 GB；**本机暂时跑不起来**（见下）",
-    ),
-    GenerationModel(
-        name="Qwen2.5-1.5B-Instruct-GGUF",
-        gguf_file="Qwen2.5-1.5B-Instruct-Q4_K_M.gguf",
-        quantization="Q4_K_M",
-        note="同族的 1.5B 量化，约 0.9 GB；**只用来验证链路**，不是选定的生产模型",
+        note="Qwen2.5-7B-Instruct Q4_K_M，约 4.4 GB；由 Ollama 承载，常驻约 5 GB",
     ),
 )
 
 DEFAULT_MODEL = MODELS[0].name
-
-# ⚠️ **本机跑 7B 的两个硬约束**（都不是代码问题）：
-#
-# 1. ``transformers`` 读 GGUF 会**把整个模型反量化成 fp32**（``gguf.quants.dequantize`` 返回
-#    float32），7B 需要约 28 GB，本机 15 GB 内存放不下——实测 OOM 在「Unable to allocate 259 MiB」。
-#    也就是说「量化权重」只在磁盘上省空间，**加载后不省内存**，这一层必须交给真正的量化推理引擎。
-# 2. 真正的引擎（``llama-cpp-python``）在本机装不了：PyPI 只有源码包，解压撞 Windows 260 字符
-#    路径上限；官方预编译 wheel 的索引可达但 wheel 本体托管在 **GitHub releases**，本机不可达（502）；
-#    退而求其次自己编译，`vcvars64.bat` 内部要调 ``reg.exe``，而它被本机安全策略**明确封禁**。
-#
-# 所以 7B 这条路的**代码已经写好**（换 ``GENERATION_MODEL`` 即可），卡在运行环境上。
-_TOKENIZER_FILES = (
-    "tokenizer.json",
-    "tokenizer_config.json",
-    "vocab.json",
-    "merges.txt",
-    "generation_config.json",
-)
 
 
 def model(name: str) -> GenerationModel:
@@ -79,16 +63,19 @@ def model(name: str) -> GenerationModel:
 
 
 def model_dir(name: str) -> Path:
-    return Path(get_settings().embedding_model_dir).expanduser() / name.replace("/", "__")
+    """GGUF 权重的落地目录（Ollama 导入时从这里读）。"""
+    spec = model(name)
+    return Path(get_settings().embedding_model_dir).expanduser() / Path(spec.gguf_file).stem
 
 
 def download(name: str, *, force: bool = False) -> Path:
+    """把 GGUF 权重下到本地。**导入 Ollama 是另一步**（见 ``ops/Modelfile.qwen2.5-7b``）。"""
     spec = model(name)
     directory = model_dir(name)
     hf_mirror.download_repo(
-        spec.name,
+        spec.source,
         directory,
-        _TOKENIZER_FILES,
+        (),
         endpoint=get_settings().hf_endpoint,
         weights=(spec.gguf_file,),
         force=force,
@@ -98,35 +85,28 @@ def download(name: str, *, force: bool = False) -> Path:
     return directory
 
 
-@lru_cache(maxsize=1)
-def load(name: str):
-    """加载分词器与模型；进程内缓存。
+def _post(path: str, payload: dict, *, timeout: float) -> dict:
+    request = urllib.request.Request(
+        f"{get_settings().ollama_host.rstrip('/')}{path}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
 
-    ⚠️ 常驻内存约 5 GB（量化权重 4.4 GB + KV cache）。§9.5 要求生成模型**按需加载、用完即释**，
-    所以调用方拿到结果后应调 ``release()``，别把它留在内存里和 Embedding / Reranker 抢。
-    """
+
+def available(name: str) -> bool:
+    """本地模型是否真的可用——**不可用就是不可用**，由调用方如实降级，不做任何外部回落。"""
     try:
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-    except ImportError as error:  # pragma: no cover
-        raise RuntimeError("缺少 transformers，安装：pip install -e .") from error
-
-    spec = model(name)
-    directory = model_dir(name)
-    if not (directory / spec.gguf_file).is_file():
-        print(f"首次使用，下载 {spec.gguf_file} …", flush=True)
-        download(name)
-    tokenizer = AutoTokenizer.from_pretrained(str(directory), gguf_file=spec.gguf_file)
-    language_model = AutoModelForCausalLM.from_pretrained(str(directory), gguf_file=spec.gguf_file)
-    language_model.eval()
-    return tokenizer, language_model
-
-
-def release() -> None:
-    """释放常驻的模型内存（§9.5 不默认常驻生成模型）。
-
-    调用方拿到结果后应调它——否则 5 GB 会和 Embedding / Reranker 一起挤在同一台机器上。
-    """
-    load.cache_clear()
+        request = urllib.request.Request(f"{get_settings().ollama_host.rstrip('/')}/api/tags")
+        with urllib.request.urlopen(request, timeout=5) as response:
+            tags = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, json.JSONDecodeError):
+        return False
+    # Ollama 的模型名带 ``:latest`` 后缀，别只按全等匹配——实测这样会误判成「不可用」
+    names = {item.get("name", "") for item in tags.get("models", [])}
+    return name in names or f"{name}:latest" in names
 
 
 def generate(
@@ -134,19 +114,17 @@ def generate(
     messages: list[dict],
     *,
     max_new_tokens: int = 512,
+    timeout: float = 600.0,
 ) -> str:
-    """按对话消息生成回复。**贪心解码**（``do_sample=False``）——法律场景要可复现。"""
-    import torch
+    """按对话消息生成回复。
 
-    tokenizer, language_model = load(name)
-    prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    inputs = tokenizer(prompt, return_tensors="pt")
-    with torch.no_grad():
-        output = language_model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            pad_token_id=tokenizer.eos_token_id,
-        )
-    completion = output[0][inputs["input_ids"].shape[-1] :]
-    return tokenizer.decode(completion, skip_special_tokens=True).strip()
+    温度取 0（**贪心解码**）——法律场景要可复现，同一个问题不该给出两个答案。
+    """
+    payload = {
+        "model": name,
+        "messages": messages,
+        "stream": False,
+        "options": {"temperature": 0, "num_predict": max_new_tokens},
+    }
+    result = _post("/api/chat", payload, timeout=timeout)
+    return (result.get("message") or {}).get("content", "").strip()

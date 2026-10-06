@@ -1,0 +1,25 @@
+# LegalMind 的本地生成模型（设计 §9.4、§9.5）
+#
+# 用 Ollama 承载 Qwen2.5-7B-Instruct 的 GGUF 量化权重。**这是本项目唯一允许的生成路径**——
+# §9.5 的决策是「因合规要求，P6 架构锁定为本地部署模型，默认关闭任何外部 API 接口」，
+# 所以这里没有、也不该有指向外部推理服务的配置。
+#
+# 用法：
+#   1. 先把 GGUF 下到本地（`app/adapters/generation.py` 里的 `download()` 会做，或手工下）：
+#      Qwen2.5-7B-Instruct-Q4_K_M.gguf（约 4.4 GB）
+#   2. ollama create legalmind-qwen2.5-7b -f ops/Modelfile.qwen2.5-7b
+#      —— 权重已经在本地时这一步只是把它**导入** Ollama 的存储，不会重新下载
+#   3. 设置 GENERATION_MODEL=legalmind-qwen2.5-7b 并确认 OLLAMA_HOST
+#
+# ⚠️ **为什么用 Ollama 而不是在 Python 里直接读 GGUF**：`transformers` 加载 GGUF 时会把整个
+# 模型反量化成 fp32，7B 需要约 28 GB 内存，普通开发机放不下（实测 OOM）。量化推理必须交给
+# 真正的量化引擎，Ollama 就是其中之一（`llama-cpp-python` 在本机装不上，原因见
+# doc/技术决策与踩坑记录.md §5.1）。
+
+FROM D:/pip-cache/legalmind-models/Qwen2.5-7B-Instruct-GGUF/Qwen2.5-7B-Instruct-Q4_K_M.gguf
+
+# 贪心解码：法律场景要可复现，同一个问题不该给出两个答案
+PARAMETER temperature 0
+PARAMETER top_p 1
+# 证据块要放得下 3～5 条条文；Ollama 默认 2048 不够
+PARAMETER num_ctx 8192

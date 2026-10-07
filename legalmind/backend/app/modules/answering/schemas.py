@@ -41,6 +41,8 @@ class AnswerRunOut(BaseModel):
     published: bool
     blocked_by: str | None
     review_required: bool
+    #: 复核人（未复核为 None）。**前端要显示「谁复核的」**——审计要的也是这个。
+    reviewed_by: UUID | None
     reviewed_at: datetime | None
     review_note: str | None
     evidence_count: int

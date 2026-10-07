@@ -44,6 +44,9 @@ class UserOut(BaseModel):
 
 class CurrentUser(UserOut):
     csrf_token: str
+    #: 当前角色对应的**权限集合**（并集）。前端用它决定菜单与按钮是否渲染；
+    #: **强制校验仍在后端**（`require_permission`），这不是授权依据。
+    permissions: list[str] = []
     # ok：可使用业务接口；enroll：需先绑定 TOTP；verify：需输入验证码
     mfa_status: Literal["ok", "enroll", "verify"]
 

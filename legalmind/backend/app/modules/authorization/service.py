@@ -4,6 +4,7 @@
 角色决定能做哪类操作；对象范围决定能对哪些对象做：同组织，且受限页面需要授权记录。
 """
 
+from collections.abc import Iterable
 from typing import Annotated
 
 from fastapi import Depends, HTTPException
@@ -54,13 +55,25 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
 }
 
 
+def permissions_for(roles: Iterable[str]) -> frozenset[str]:
+    """一个角色集合对应的权限集合（**并集**；未知角色不授予任何权限）。
+
+    **为什么要有这个出口**：前端要按权限决定菜单与按钮要不要渲染。让**后端**给出能力集合，
+    前端就不必复制一份「角色→权限」映射——那份复制会静默漂移（CODE_REVIEW m6 记的正是这件事：
+    后端改了权限，前端的提示还停在旧名单）。
+
+    ⚠️ **这只用于显示层**：强制校验永远在 `require_permission`（后端逐请求重读角色）。
+    """
+    return frozenset(
+        permission for role in roles for permission in ROLE_PERMISSIONS.get(role, frozenset())
+    )
+
+
 class AuthorizationService:
     @staticmethod
     def can(principal: Principal, permission: str) -> bool:
         # 未知角色不授予任何权限
-        return any(
-            permission in ROLE_PERMISSIONS.get(role, frozenset()) for role in principal.roles
-        )
+        return permission in permissions_for(principal.roles)
 
     @staticmethod
     def wiki_page_scope(principal: Principal) -> ColumnElement[bool]:

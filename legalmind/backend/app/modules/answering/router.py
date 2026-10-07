@@ -86,6 +86,7 @@ async def _to_out(run: AnswerRun, cache) -> AnswerRunOut:
         blocked_by=run.blocked_by,
         clarifying=run.state in SUSPENDED_STATES,
         review_required=run.review_required,
+        reviewed_by=run.reviewed_by,
         reviewed_at=run.reviewed_at,
         review_note=run.review_note,
         evidence_count=len(run.evidence or []),

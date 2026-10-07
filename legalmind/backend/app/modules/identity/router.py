@@ -16,7 +16,7 @@ from app.core.security import (
     mfa_status,
 )
 from app.models import AuthSession, User
-from app.modules.authorization.service import USER_MANAGE, require_permission
+from app.modules.authorization.service import USER_MANAGE, permissions_for, require_permission
 from app.modules.identity import mfa, service
 from app.modules.identity.schemas import (
     CreateUser,
@@ -58,6 +58,7 @@ async def login(
     return CurrentUser(
         **result.user.model_dump(),
         csrf_token=result.csrf_token,
+        permissions=sorted(permissions_for(result.user.roles)),
         mfa_status=result.mfa_status,
     )
 
@@ -83,6 +84,7 @@ async def me(session: SessionDep, principal: LoggedInDep):
     return CurrentUser(
         **out.model_dump(),
         csrf_token=csrf_token,
+        permissions=sorted(permissions_for(out.roles)),
         mfa_status=mfa_status(user, principal.mfa_pending),
     )
 

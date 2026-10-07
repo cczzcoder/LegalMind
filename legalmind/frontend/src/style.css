@@ -1,39 +1,39 @@
+/*
+ * 全局样式只放**真正全局**的东西：基础排版、长文本断行、动效偏好。
+ *
+ * 布局与间距一律交给 Ant Design 的组件与主题 token（`app/theme.ts`），
+ * 不在这里堆业务类名——否则样式会散在两处，改主题时漏掉一半。
+ */
+
 body {
   margin: 0;
   background: #f5f7fa;
   color: #172b4d;
-  font-family: system-ui, sans-serif;
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    "PingFang SC",
+    "Hiragino Sans GB",
+    "Microsoft YaHei",
+    sans-serif;
 }
 
-.container {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 24px;
-}
-
-.section {
-  margin-top: 20px;
-}
-
-.columns {
-  display: grid;
-  grid-template-columns: 300px minmax(0, 1fr);
-  gap: 20px;
-  margin-top: 20px;
-}
-
-.revision-body {
+/* 中文长句与长 id 都要能断，避免出现横向滚动条 */
+.long-text {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font-family: inherit;
+  line-height: 1.75;
 }
 
-@media (max-width: 800px) {
-  .columns {
-    grid-template-columns: 1fr;
-  }
-
-  .container {
-    padding: 12px;
+/* 尊重系统的「减少动态效果」偏好（无障碍） */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

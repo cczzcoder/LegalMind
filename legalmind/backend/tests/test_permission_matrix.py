@@ -105,3 +105,35 @@ async def test_role_permission_matrix(role, make_client, make_user, tmp_path):
     for response, ok in zip(responses, allowed, strict=True):
         if not ok:
             assert response.status_code == 403
+
+
+async def test_login_and_me_expose_the_permission_set(make_client, make_user):
+    """`/auth/login` 与 `/auth/me` 都要回传**权限集合**（`permissions`）。
+
+    这是前端显示层的依据：**前端不复制「角色→权限」映射**——那份复制会静默漂移
+    （CODE_REVIEW m6：后端改了权限，前端的提示还停在旧名单）。所以后端把集合算好给出去，
+    并由这条测试钉住「接口回传的集合 == `permissions_for(角色)`」。
+
+    ⚠️ 它**不是授权依据**：强制校验仍在 `require_permission`。
+    """
+    from app.modules.authorization.service import permissions_for
+
+    user = await make_user("legal_reviewer")
+    async with make_client() as client:
+        login_response = await login(client, user.username)
+        assert login_response.status_code == 200
+        body = login_response.json()
+        assert sorted(body["permissions"]) == sorted(permissions_for({"legal_reviewer"}))
+        assert "review.decide" in body["permissions"]
+
+        me_response = await client.get("/api/v1/auth/me")
+        assert me_response.status_code == 200
+        assert sorted(me_response.json()["permissions"]) == sorted(body["permissions"])
+
+
+async def test_unknown_role_grants_nothing():
+    """未知角色不授予任何权限——`permissions_for` 是 `can()` 的唯一实现。"""
+    from app.modules.authorization.service import permissions_for
+
+    assert permissions_for({"nobody"}) == frozenset()
+    assert permissions_for(set()) == frozenset()

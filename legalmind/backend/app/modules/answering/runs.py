@@ -20,6 +20,7 @@ answer-run 落地的时候。
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from hashlib import sha256
+from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -117,7 +118,12 @@ def apply_run_result(
     run.question_sha256 = _digest(question) or run.question_sha256
     run.answer_sha256 = _digest(answer.answer)
     run.evidence = evidence_refs(answer.citations, answer.cited_evidence_ids)
-    run.config = config
+    # ⚠️ **合并，不是覆盖**：`submit_question` 在**提交时**就往 config 里写了提交参数（如
+    # `session_id`），而这里补的是**运行时**的配置快照（模型、检索通路、提示词哈希）。
+    # 整个覆盖会把提交侧的键**悄悄抹掉**——实测踩过：`session_id` 提交时写进去了，
+    # 跑完却没了，接口回传的 `session_id` 恒为 null，前端因此永远拼不出上文。
+    # 两个来源的键**不重叠**，合并才是「配置快照」该有的样子。
+    run.config = {**(run.config or {}), **config}
     run.blocked_by = answer.blocked_by
     run.published = answer.published
     run.seconds = answer.seconds
@@ -223,6 +229,7 @@ async def submit_question(
     question: str,
     *,
     cache: AnswerCache,
+    session_id: UUID | None = None,
     limit: int = 5,
     max_new_tokens: int = 512,
     model: str | None = None,
@@ -235,6 +242,9 @@ async def submit_question(
 
     ⚠️ `question_sha256` 取**脱敏后**文本的哈希：短问题的原文哈希可被穷举反推（比如一个身份证号），
     脱敏后的哈希没有这个风险。
+
+    `session_id` 非空时走**多轮追问**（§9.6）：它随任务一起传给 worker——**补全发生在 worker 里**
+    （那里才读得到会话缓存），所以这里只是把它带过去，不在这里读会话。
     """
     if not cache.available:
         raise CacheUnavailable("未配置短期缓存（CACHE_URL），无法提交异步问答；请改用同步 ask")
@@ -246,7 +256,13 @@ async def submit_question(
         requested_by=principal.user_id,
         question_sha256=_digest(redacted_question) or "",
         evidence=[],
-        config={"limit": limit, "max_new_tokens": max_new_tokens, "model": model},
+        config={
+            "limit": limit,
+            "max_new_tokens": max_new_tokens,
+            "model": model,
+            # 会话 id 进配置快照：复核时要能看出「这次是追问、属于哪个会话」（§9.4 要求配置快照）
+            "session_id": str(session_id) if session_id is not None else None,
+        },
         published=False,
         review_required=False,
     )
@@ -263,6 +279,7 @@ async def submit_question(
             "limit": limit,
             "max_new_tokens": max_new_tokens,
             "model": model,
+            "session_id": str(session_id) if session_id is not None else None,
         },
         idempotency_key=f"{run.id}:{QUESTION_JOB}:{ANSWER_CONFIG_VERSION}",
         status="pending",

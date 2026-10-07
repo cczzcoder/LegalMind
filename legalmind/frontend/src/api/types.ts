@@ -56,6 +56,8 @@ export type AnswerRun = {
   /** 在等用户补充（CLARIFYING）——此时 `answer` 里是**澄清问题**，不是结论 */
   clarifying: boolean;
   content_available: boolean;
+  /** 这次运行属于哪个会话（设计 §9.6 多轮追问）；单轮为 null */
+  session_id: string | null;
   question: string | null;
   answer: string | null;
 };
@@ -65,6 +67,8 @@ export type SubmitQuestion = {
   limit?: number;
   max_new_tokens?: number;
   model?: string | null;
+  /** 会话 id（设计 §9.6）。**留空即单轮**——多轮是可选增强，不是主链路 */
+  session_id?: string | null;
 };
 
 export type CitationAnchor = {
@@ -161,3 +165,58 @@ export type StreamEvent =
   | { name: "timeout"; data: { state: AnswerState; detail: string } }
   | { name: "error"; data: { detail: string } }
   | { name: "done"; data: Record<string, never> };
+
+// ---- 文献管理（设计 §7、§13；《前端界面说明》§5.8）----
+
+export type SourceType = "official" | "republished" | "internal";
+export type TrustLevel = "high" | "medium" | "low";
+export type Sensitivity = "public" | "internal" | "confidential";
+// `AccessScope` 文件开头已有定义（后端 `documents/schemas.py` 的同一个字面量），这里不重复声明
+
+/** 来源登记（FR-01）。**授权说明必填**——没有它就不能入库（设计 §20.3）。 */
+export type SourceRecord = {
+  id: string;
+  name: string;
+  source_type: SourceType;
+  trust_level: TrustLevel;
+  url: string | null;
+  publisher: string | null;
+  license_note: string;
+  last_checked_at: string | null;
+  created_at: string;
+};
+
+/** 原件。**这是不可变的登记记录**，不是解析产物（设计 §5.3）。 */
+export type DocumentRecord = {
+  id: string;
+  source_id: string;
+  original_filename: string;
+  media_type: string;
+  size_bytes: number;
+  sha256: string;
+  sensitivity: Sensitivity;
+  access_scope: AccessScope;
+  acquired_at: string | null;
+  created_by: string;
+  created_at: string;
+};
+
+/** 导入的返回：原件已登记，**解析任务只是登记了、还没跑**（202）。 */
+export type ImportResult = {
+  document: DocumentRecord;
+  job_id: string;
+};
+
+/** 解析任务。`status` 见 `jobs/service.py`；**资源不足会记 `resource_exhausted`**，不伪装成功（FR-13）。 */
+export type JobRecord = {
+  id: string;
+  job_type: string;
+  status: string;
+  attempt_count: number;
+  max_attempts: number;
+  error_code: string | null;
+  error_message: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+};

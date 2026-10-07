@@ -1,7 +1,10 @@
 import {
   CheckCircleOutlined,
+  CommentOutlined,
+  LoadingOutlined,
   ReloadOutlined,
   SafetyCertificateOutlined,
+  SendOutlined,
   WarningOutlined,
 } from "@ant-design/icons";
 import {
@@ -13,6 +16,7 @@ import {
   Form,
   Grid,
   Input,
+  Progress,
   Space,
   Steps,
   Tag,
@@ -21,13 +25,16 @@ import {
 import dayjs from "dayjs";
 import { useEffect, useMemo, useState } from "react";
 
-import { getRun, reviewRun, submitClarification } from "../api/answers";
+import { getRun, reviewRun, submitClarification, submitQuestion } from "../api/answers";
 import { describeError } from "../api/client";
 import type { AnswerState, AnswerRun } from "../api/types";
+import { currentConversation, rememberTurn, startConversation } from "../app/conversation";
 import { PERMISSIONS } from "../app/nav";
+import { navigate } from "../app/router";
 import { useSession } from "../app/session-context";
 import { AsyncBoundary } from "../components/AsyncBoundary";
 import { CopyableId } from "../components/CopyableId";
+import { Link } from "../components/Link";
 import { DisclaimerBar, LongText } from "../components/NoticeBar";
 import { RunStateTag } from "../components/StatusTag";
 import { runStateLabel } from "../app/statusLabels";
@@ -59,6 +66,54 @@ const BLOCKED_REASON: Record<string, string> = {
   format: "模型没有按约定输出结构化结论",
   clarifying: "问题太笼统，需要补充信息",
 };
+
+/**
+ * 各阶段的**经验总耗时**（秒），用来给用户一个「还要多久」的量级。
+ *
+ * ⚠️ **这是粗估，不是预测**：取自本机实测（检索 ~6 s、装配 <1 s、生成 20–60 s、核验 <1 s，
+ * 一次问答通常 55–90 s；**首次加载 7B 权重会更久**）。换机器、换模型都要重核这些数。
+ * 界面上必须写明它是经验值——**把估算说成事实，比不给估算更糟**。
+ */
+const STAGE_BUDGET_SECONDS: Record<string, number> = {
+  CREATED: 90,
+  RETRIEVING: 85,
+  RERANKING: 80,
+  ASSEMBLING_EVIDENCE: 75,
+  GENERATING: 70,
+  VERIFYING: 15,
+};
+
+const DEFAULT_BUDGET_SECONDS = 90;
+
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return rest === 0 ? `${minutes} 分` : `${minutes} 分 ${rest} 秒`;
+}
+
+function remainingLabel(state: string | null, elapsed: number): string {
+  const budget = (state && STAGE_BUDGET_SECONDS[state]) || DEFAULT_BUDGET_SECONDS;
+  const remaining = budget - elapsed;
+  // 超了预算就**如实说慢**，不要显示「还需 0 秒」或者干脆不显示——那是在骗人
+  if (remaining <= 15) return "比预计慢一些，仍在处理中";
+  if (remaining < 60) return "预计还需不到 1 分钟";
+  return `预计还需约 ${Math.ceil(remaining / 60)} 分钟`;
+}
+
+/** 已用时间（秒）。起点取运行记录的 `created_at`——**刷新页面后仍然算得准**。 */
+function useElapsedSeconds(startedAt: string | null | undefined): number {
+  const [mountedAt] = useState(() => Date.now());
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const start = startedAt ? dayjs(startedAt).valueOf() : mountedAt;
+  return Math.max(0, Math.round((now - start) / 1000));
+}
 
 /**
  * 把后端渲染好的澄清文本拆成「问题 + 候选项」。
@@ -366,16 +421,14 @@ export default function AnswerRunPage({ runId }: { runId: string }) {
       )}
 
       {!isTerminal && !isClarifying && (
-        <Card>
-          <Space>
-            <Typography.Text type="secondary">
-              正在处理（{state ? runStateLabel(state) : "等待中"}）…
-            </Typography.Text>
-          </Space>
-        </Card>
+        <ProcessingCard state={state} startedAt={run?.created_at ?? null} />
       )}
 
       <DisclaimerBar />
+
+      {/* 继续追问（§5.8 / 设计 §9.6）：**只在终态渲染**——运行还没跑完就追问，用户会同时看到
+          两条在飞的运行，而单机是单并发（§14.2），新的那条还得等前面那条让出资源。 */}
+      {isTerminal && <FollowUpPanel run={run} />}
 
       {/* 人工复核（§9.3 第三层）：有 review.decide 才渲染；强制校验在后端 */}
       {can(PERMISSIONS.reviewDecide) && (
@@ -453,6 +506,163 @@ function ReviewPanel({
           记录复核
         </Button>
       </Form>
+    </Card>
+  );
+}
+
+/**
+ * 生成中的进度卡（《前端界面说明》§5.3）。
+ *
+ * **为什么要给时间量级**：一次问答要 1–2 分钟，而页面在这期间除了状态文字没有任何变化——
+ * 用户不知道是在跑还是卡住了。给一个**已用时间（真实）**加**预计量级（粗估）**，是让人放心的
+ * 最低成本做法。
+ *
+ * ⚠️ **必须写明是粗估**：估算说成事实比不给估算更糟（§20.2 的「标注不确定性」同一口径）。
+ * 进度条**刻意不到 100%**——到了 100% 却还在转，比停在 80% 更让人怀疑。
+ */
+function ProcessingCard({
+  state,
+  startedAt,
+}: {
+  state: AnswerState | null;
+  startedAt: string | null;
+}) {
+  const elapsed = useElapsedSeconds(startedAt);
+  const budget = (state && STAGE_BUDGET_SECONDS[state]) || DEFAULT_BUDGET_SECONDS;
+  const percent = Math.min(95, Math.max(5, Math.round((elapsed / budget) * 100)));
+
+  return (
+    <Card
+      title={
+        <Space>
+          <LoadingOutlined />
+          正在处理
+        </Space>
+      }
+    >
+      <Space direction="vertical" size={10} style={{ width: "100%" }}>
+        <Space wrap size={12}>
+          <Tag color="processing">{state ? runStateLabel(state) : "等待中"}</Tag>
+          <Typography.Text type="secondary">已用 {formatDuration(elapsed)}</Typography.Text>
+          <Typography.Text strong>{remainingLabel(state, elapsed)}</Typography.Text>
+        </Space>
+
+        <Progress percent={percent} status="active" showInfo={false} />
+
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          时间按本机实测的经验值粗估，不是精确预测：生成阶段最慢，一次问答通常 1–2 分钟，
+          首次加载模型会更久。可以离开本页，运行会在后台继续；超过 5 分钟没有变化可刷新重进。
+        </Typography.Text>
+      </Space>
+    </Card>
+  );
+}
+
+/**
+ * 继续追问（《前端界面说明》§5.8；设计 §9.6 多轮追问）。
+ *
+ * 后端会把**最近 1 轮**的问题与这次追问拼成自足的问题再检索；**历史答案不进提示词**（§9.6 边界一）。
+ *
+ * ⚠️ **会话 id 不进 URL**（§9.6）：后端认的那个在运行记录里（`run.session_id`），本地只留一份
+ * 轮次列表，用来给用户一个「回到前几轮」的入口。**本地列表只在与运行记录的会话一致时才有意义**
+ * ——否则它是别的会话遗留的，拼进来只会让人误解。
+ */
+function FollowUpPanel({ run }: { run: AnswerRun | null }) {
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [conversation, setConversation] = useState(() => currentConversation());
+
+  const thread =
+    run?.session_id && conversation?.sessionId === run.session_id ? conversation.turns : [];
+
+  async function ask() {
+    const question = text.trim();
+    if (!question) return;
+    setBusy(true);
+    setError("");
+    // ⚠️ 运行没有会话（CLI 建的、或本功能上线前的数据）就**新开一个**——宁可少一点上下文，
+    // 也不要把浏览器里遗留的上文拼进来。
+    const sessionId = run?.session_id ?? startConversation().sessionId;
+    try {
+      const next = await submitQuestion({ question, session_id: sessionId });
+      rememberTurn(sessionId, next.id, question);
+      setConversation(currentConversation());
+      setText("");
+      navigate(`/answers/${next.id}`);
+    } catch (reason) {
+      setError(describeError(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card
+      title={
+        <Space>
+          <CommentOutlined />
+          继续追问
+        </Space>
+      }
+      extra={
+        <Button size="small" disabled={busy} onClick={() => setConversation(startConversation())}>
+          开始新会话
+        </Button>
+      }
+    >
+      {thread.length > 0 && (
+        <Space direction="vertical" size={4} style={{ width: "100%", marginBottom: 12 }}>
+          {thread.map((turn, index) => (
+            <Typography.Text
+              key={turn.runId}
+              type={turn.runId === run?.id ? undefined : "secondary"}
+              strong={turn.runId === run?.id}
+            >
+              第 {index + 1} 轮：
+              {turn.runId === run?.id ? (
+                turn.question
+              ) : (
+                <Link to={`/answers/${turn.runId}`}>{turn.question}</Link>
+              )}
+            </Typography.Text>
+          ))}
+        </Space>
+      )}
+
+      <Form layout="vertical">
+        <Form.Item
+          label="追问"
+          extra="同一会话内的追问会带上文（后端只取最近 1 轮）；问题文本与会话 id 都不进 URL。"
+        >
+          <Input.TextArea
+            value={text}
+            rows={2}
+            maxLength={2000}
+            showCount
+            disabled={busy}
+            placeholder="例如：那如果是这样呢？"
+            onChange={(event) => setText(event.target.value)}
+            onPressEnter={(event) => {
+              if (!event.shiftKey) {
+                event.preventDefault();
+                void ask();
+              }
+            }}
+          />
+        </Form.Item>
+        <Button
+          type="primary"
+          icon={<SendOutlined />}
+          loading={busy}
+          disabled={!text.trim()}
+          onClick={() => void ask()}
+        >
+          提交追问
+        </Button>
+      </Form>
+
+      {error && <Alert style={{ marginTop: 12 }} type="error" showIcon message={error} />}
     </Card>
   );
 }

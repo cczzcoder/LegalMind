@@ -23,6 +23,7 @@ export type NavItem = {
 
 export const PERMISSIONS = {
   documentRead: "document.read",
+  documentWrite: "document.write",
   wikiRead: "wiki.read",
   wikiWrite: "wiki.write",
   reviewDecide: "review.decide",
@@ -70,6 +71,14 @@ export const NAV: NavItem[] = [
     icon: "book",
     permission: PERMISSIONS.wikiRead,
     detail: true,
+  },
+  {
+    path: "/documents",
+    label: "文献管理",
+    icon: "folder",
+    // 看得见列表只要 `document.read`；**上传按钮**另按 `document.write` 判（见页面内注释）
+    permission: PERMISSIONS.documentRead,
+    hint: "登记原件并查看解析进度。导入的是**原件**，解析产物与版本树由后台流水线生成。",
   },
 ];
 

@@ -173,10 +173,13 @@ async def handle_answer_question(
     # ⚠️ **这里刻意不包 try/except**：失败时**不动运行记录**——任务会重试，重试前会把状态复位；
     # 而「永久失败」由 job 表记录（运行记录停在最后一次尝试的状态，`answer-run` 会把任务状态
     # 一并显示出来）。在这里补一个 FAILED 反而会让重试撞上终态（转移表里 FAILED 没有出边）。
+    # §9.6 多轮追问：会话 id 随任务传过来，**补全发生在 worker 里**（只有这里读得到会话缓存）
+    raw_session = job.payload.get("session_id")
     answer = await answering_service.answer_question(
         session,
         principal,
         question,
+        session_id=UUID(raw_session) if raw_session else None,
         limit=job.payload.get("limit", 5),
         max_new_tokens=job.payload.get("max_new_tokens", 512),
         model=job.payload.get("model"),
@@ -184,6 +187,8 @@ async def handle_answer_question(
         on_state=on_state,
         # **更新 submit 时建好的那一行**，不要再建一行（实测踩过：一次运行留两条记录）
         run_row=run,
+        # 链路要读写会话缓存（§9.6），所以把已经建好的缓存传进去，别在里面再建一个
+        cache=cache,
     )
 
     # ⚠️ **先脱敏再缓存**：缓存里不得出现未脱敏的客户内容（设计 §21.3）

@@ -49,7 +49,11 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     const token = bridge.csrfToken();
     if (token) headers.set("X-CSRF-Token", token);
   }
-  if (init.body !== undefined) headers.set("Content-Type", "application/json");
+  if (init.body !== undefined && !headers.has("Content-Type")) {
+    // ⚠️ **只在调用方没指定时才默认 JSON**：上传原件要发 `application/octet-stream`
+    // （后端读的是**原始字节**，不是 multipart），硬盖成 JSON 会让请求体被当成 JSON 解析。
+    headers.set("Content-Type", "application/json");
+  }
 
   let response: Response;
   try {

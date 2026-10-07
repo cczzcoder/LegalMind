@@ -1,6 +1,7 @@
 import {
   BookOutlined,
   FileSearchOutlined,
+  FolderOpenOutlined,
   LogoutOutlined,
   MenuOutlined,
   MessageOutlined,
@@ -32,6 +33,7 @@ const ICONS: Record<string, ReactNode> = {
   review: <SafetyCertificateOutlined />,
   search: <FileSearchOutlined />,
   book: <BookOutlined />,
+  folder: <FolderOpenOutlined />,
 };
 
 export function AppShell({ pattern, children }: { pattern: string; children: ReactNode }) {
@@ -90,7 +92,14 @@ export function AppShell({ pattern, children }: { pattern: string; children: Rea
           </Link>
         </Typography.Text>
         <div style={{ flex: 1 }} />
-        <Space size={8}>
+        {/*
+          ⚠️ `lineHeight: 1` 是**必须的**，不是风格偏好：antd 的 `Layout.Header` 自带
+          `line-height: 56px`，而 `Typography.Text` 一旦加 `ellipsis`，antd 会给它
+          `vertical-align: bottom` —— 于是这个 inline-block 被贴到 56px 行盒的**底部**，
+          用户名比角色标签和登出按钮低 15px（实测 top 33 vs 18 / 10）。
+          把行高归位后，行盒高度贴着内容，由外层 header 的 `align-items: center` 居中。
+        */}
+        <Space size={8} style={{ lineHeight: 1 }}>
           <Typography.Text style={{ color: "rgba(255,255,255,0.85)" }} ellipsis>
             {user?.username}
           </Typography.Text>

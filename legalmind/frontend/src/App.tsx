@@ -24,6 +24,7 @@ const AnswerRunPage = lazy(() => import("./pages/AnswerRunPage"));
 const ReviewQueuePage = lazy(() => import("./pages/ReviewQueuePage"));
 const SearchPage = lazy(() => import("./pages/SearchPage"));
 const WikiPage = lazy(() => import("./pages/WikiPage"));
+const DocumentsPage = lazy(() => import("./pages/DocumentsPage"));
 const NotFoundPage = lazy(() => import("./pages/NotFoundPage"));
 
 /** 路由 → 页面。参数以 props 传入（详情页需要 id）。 */
@@ -34,6 +35,7 @@ const PAGES: Record<string, (params: RouteParams) => ReactNode> = {
   "/search": () => <SearchPage />,
   "/wiki": () => <WikiPage />,
   "/wiki/:pageId": (params) => <WikiPage pageId={params.pageId} />,
+  "/documents": () => <DocumentsPage />,
 };
 
 // 开发期自检：导航表里每一项都必须有渲染分支，否则新加页面会静默 404

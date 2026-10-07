@@ -40,7 +40,12 @@ from app.modules.answering.schemas import (
     ReviewRequest,
     SubmitQuestion,
 )
-from app.modules.authorization.service import DOCUMENT_READ, REVIEW_DECIDE, require_permission
+from app.modules.authorization.service import (
+    DOCUMENT_READ,
+    REVIEW_DECIDE,
+    AuthorizationService,
+    require_permission,
+)
 
 router = APIRouter(tags=["answering"])
 
@@ -78,6 +83,12 @@ async def _to_out(run: AnswerRun, cache) -> AnswerRunOut:
     """把运行记录 + 短期缓存里的内容拼成响应。"""
     answer = await answer_runs.read_answer(cache, run.id)
     question = await answer_runs.read_question(cache, run.id) if answer is not None else None
+    # 会话 id 在配置快照里（§9.6）；存的是字符串，转回 UUID，坏值按「没有会话」处理
+    raw_session = (run.config or {}).get("session_id")
+    try:
+        session_id = UUID(raw_session) if raw_session else None
+    except (ValueError, TypeError):
+        session_id = None
     return AnswerRunOut(
         id=run.id,
         state=run.state,
@@ -93,6 +104,7 @@ async def _to_out(run: AnswerRun, cache) -> AnswerRunOut:
         seconds=run.seconds,
         created_at=run.created_at,
         content_available=answer is not None,
+        session_id=session_id,
         question=question,
         answer=answer,
     )
@@ -118,6 +130,8 @@ async def submit_question(data: SubmitQuestion, session: SessionDep, principal: 
                 principal,
                 data.question,
                 cache=cache,
+                # §9.6：留空即单轮——**单轮是主链路，不能因为会话功能而不可用**
+                session_id=data.session_id,
                 limit=data.limit,
                 max_new_tokens=data.max_new_tokens,
                 model=data.model,
@@ -130,11 +144,27 @@ async def submit_question(data: SubmitQuestion, session: SessionDep, principal: 
 @router.get("/answers", response_model=list[AnswerRunOut])
 async def list_runs(
     session: SessionDep,
-    principal: ReviewerDep,
-    pending: bool = Query(default=False, description="只看待人工复核的"),
+    principal: ReaderDep,
+    pending: bool = Query(default=False, description="只看待人工复核的（待审队列）"),
     limit: int = Query(default=50, ge=1, le=200),
 ):
-    """列出本组织的问答运行；`pending=true` 即**待审队列**（设计 §9.3 第三层）；需 `review.decide`。"""
+    """列出**我提交的**问答运行；`pending=true` 即**待审队列**（设计 §9.3 第三层）。
+
+    ⚠️ **两种模式的权限不同，这是有意的**（此前两种模式都按 `review.decide` 要求，
+    结果是**普通提问者连自己问过什么都看不到**——界面上的「我提交的运行」直接 403）：
+
+    - `pending=false` → **我提交的运行**（`requested_by` 是本人）。问过问题的人就该看得到自己问过
+      什么，所以只要 `document.read`。
+    - `pending=true` → **待审队列**：组织内 `NEEDS_REVIEW` 且未复核的运行，**别人提交的也要看得到**，
+      所以额外要 `review.decide`。
+
+    ⚠️ **`pending=false` 刻意不返回全组织的运行**：那会让任何一个能提问的人看到同事问过什么
+    （问题正文在短期缓存里，往往就是当事人的具体情形）。**复核人要看别人的运行，走待审队列**；
+    按 id 取单条仍是组织范围（§21「用户私有数据按租户隔离」，且复核流程需要它）。
+    """
+    if pending and not AuthorizationService.can(principal, REVIEW_DECIDE):
+        raise HTTPException(status_code=403, detail="Permission denied")
+
     cache = answer_cache.from_settings(get_settings())
     try:
         if pending:
@@ -143,7 +173,10 @@ async def list_runs(
             rows = list(
                 await session.scalars(
                     select(AnswerRun)
-                    .where(AnswerRun.organization_id == principal.organization_id)
+                    .where(
+                        AnswerRun.organization_id == principal.organization_id,
+                        AnswerRun.requested_by == principal.user_id,
+                    )
                     .order_by(AnswerRun.created_at.desc())
                     .limit(limit)
                 )

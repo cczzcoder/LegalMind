@@ -310,6 +310,54 @@ async def test_pending_queue_lists_only_review_required(
     assert [item["id"] for item in pending] == [created["id"]]
 
 
+async def test_a_reader_sees_only_their_own_runs(cache, make_client, make_user):
+    """⚠️ **普通提问者也要看得到自己问过什么**。
+
+    列表接口原先对**两种模式**都要求 `review.decide`，于是界面上「我提交的运行」对读者直接 403——
+    而「列运行列表」本来就不是复核动作。
+
+    同时钉住**不返回全组织**：同组织里别人提交的运行不该出现在我的列表里——问题正文在短期缓存里，
+    往往就是当事人的具体情形。**复核人要看别人的运行走待审队列。**
+    """
+    mine = await make_user("reader")
+    theirs = await make_user("reader", organization_id=mine.organization_id)
+    async with make_client() as my_client, make_client() as their_client:
+        await login(my_client, mine.username)
+        await login(their_client, theirs.username)
+        my_run = await _submit(my_client, "我的问题：工资怎么发？")
+        await _submit(their_client, "同事的问题：单位欠缴社保费怎么办？")
+
+        rows = (await my_client.get("/api/v1/answers")).json()
+
+    assert [item["id"] for item in rows] == [my_run["id"]]
+
+
+async def test_a_reader_cannot_open_the_review_queue(cache, make_client, make_user):
+    """待审队列是**复核人**的视图（组织内别人提交的也要看得到），所以额外要 `review.decide`。"""
+    async with make_client() as client:
+        await _sign_in(client, make_user, "reader")
+        assert (await client.get("/api/v1/answers?pending=true")).status_code == 403
+
+
+async def test_a_single_run_is_still_readable_across_the_organization(
+    cache, make_client, make_user
+):
+    """**按 id 取单条仍是组织范围**（§21「用户私有数据按租户隔离」），复核流程要靠它。
+
+    ⚠️ 这与「列表只给自己的」**不对称，是有意的**：列表是浏览，单条是**有明确目标**的访问
+    （复核人从待审队列点进来、或别人把运行 id 发给你）。**要收紧到「只有本人和复核人能看单条」，
+    那是另一个决定**——它会动到复核流程，得先过设计。
+    """
+    mine = await make_user("reader")
+    theirs = await make_user("reader", organization_id=mine.organization_id)
+    async with make_client() as my_client, make_client() as their_client:
+        await login(my_client, mine.username)
+        await login(their_client, theirs.username)
+        my_run = await _submit(my_client, "我的问题：工资怎么发？")
+
+        assert (await their_client.get(f"/api/v1/answers/{my_run['id']}")).status_code == 200
+
+
 async def test_job_payload_never_holds_the_question(cache, make_client, make_user, session_factory):
     """**问题不进数据库**（§21）——它只走短期缓存。"""
     secret = "我身份证是110101199003072316"

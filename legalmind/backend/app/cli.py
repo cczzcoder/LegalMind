@@ -181,12 +181,20 @@ async def withdraw_documents_command(
 
 
 async def ask_command(
-    username: str, question: str, limit: int, max_new_tokens: int, model: str | None
+    username: str,
+    question: str,
+    limit: int,
+    max_new_tokens: int,
+    model: str | None,
+    session_id: str | None = None,
 ) -> None:
     """最小可用的证据约束问答（设计 §9；P6 的第一刀）；需 document.read。
 
     **只用本地生成模型**——§9.5 的决策锁定本地部署、默认关闭任何外部 API 接口。
     检索一条都没命中时不调用模型，直接返回「依据不足」。
+
+    `--session` 给同一个会话 id 时走**多轮追问**（§9.6）：把上文拼进检索查询，
+    **历史答案不进提示词**。缓存未配置时多轮不可用，单轮照常。
     """
     async with SessionFactory() as session:
         try:
@@ -197,6 +205,7 @@ async def ask_command(
                 session,
                 principal,
                 question,
+                session_id=UUID(session_id) if session_id else None,
                 limit=limit,
                 max_new_tokens=max_new_tokens,
                 model=model,
@@ -357,7 +366,12 @@ async def review_run_command(username: str, run_id: str, note: str | None) -> No
 
 
 async def ask_async_command(
-    username: str, question: str, limit: int, max_new_tokens: int, model: str | None
+    username: str,
+    question: str,
+    limit: int,
+    max_new_tokens: int,
+    model: str | None,
+    session_id: str | None = None,
 ) -> None:
     """异步问答（设计 §9.4）：**提交后立刻返回**，由 worker 在后台执行。
 
@@ -377,6 +391,7 @@ async def ask_async_command(
                         principal,
                         question,
                         cache=cache,
+                        session_id=UUID(session_id) if session_id else None,
                         limit=limit,
                         max_new_tokens=max_new_tokens,
                         model=model,
@@ -1007,6 +1022,11 @@ def main() -> None:
     ask.add_argument("--max-new-tokens", type=int, default=512, help="最多生成多少 token")
     ask.add_argument("--model", default=None, help="覆盖生成模型（默认取配置里的）")
     ask.add_argument(
+        "--session",
+        default=None,
+        help="会话 id（设计 §9.6 多轮追问）；同一会话内追问会带上文，需配置 CACHE_URL",
+    )
+    ask.add_argument(
         "--async",
         dest="run_async",
         action="store_true",
@@ -1138,7 +1158,16 @@ def main() -> None:
 
     if args.command == "ask":
         handler = ask_async_command if args.run_async else ask_command
-        asyncio.run(handler(args.actor, args.question, args.limit, args.max_new_tokens, args.model))
+        asyncio.run(
+            handler(
+                args.actor,
+                args.question,
+                args.limit,
+                args.max_new_tokens,
+                args.model,
+                args.session,
+            )
+        )
         return
 
     if args.command == "clarify-run":

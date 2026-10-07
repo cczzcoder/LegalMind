@@ -18,6 +18,9 @@ class SubmitQuestion(BaseModel):
     limit: int = Field(default=5, ge=1, le=50, description="取多少条依据")
     max_new_tokens: int = Field(default=512, ge=64, le=4096)
     model: str | None = Field(default=None, description="覆盖生成模型（默认取配置里的）")
+    #: 会话 id（设计 §9.6 多轮追问）。留空即单轮——**单轮是主链路，不能因为会话功能而不可用**。
+    #: 由前端生成并自己保存，**不进 Cookie、不进 URL**（§5.2 验收 4 同口径）。
+    session_id: UUID | None = Field(default=None, description="会话 id；留空为单轮问答")
 
 
 class ClarifyRequest(BaseModel):
@@ -53,5 +56,7 @@ class AnswerRunOut(BaseModel):
     clarifying: bool = False
     #: 短期缓存里还有没有内容（TTL 到期、未配置缓存、或没产出 → false）
     content_available: bool
+    #: 这次运行属于哪个会话（设计 §9.6 多轮追问）；单轮为 None。取自运行记录的配置快照。
+    session_id: UUID | None = None
     question: str | None = None
     answer: str | None = None

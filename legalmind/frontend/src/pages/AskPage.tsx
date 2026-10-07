@@ -18,6 +18,13 @@ import { useState } from "react";
 import { submitQuestion } from "../api/answers";
 import { ApiError, describeError } from "../api/client";
 import type { AnswerRun } from "../api/types";
+import {
+  currentConversation,
+  ensureConversation,
+  rememberTurn,
+  startConversation,
+  type Conversation,
+} from "../app/conversation";
 import { navigate } from "../app/router";
 import { AsyncBoundary } from "../components/AsyncBoundary";
 import { DisclaimerBar } from "../components/NoticeBar";
@@ -26,10 +33,14 @@ import { useAsync } from "../hooks/useAsync";
 import { listRuns } from "../api/answers";
 
 /**
- * 问答页（《前端界面说明》§5.2）。
+ * 问答页（《前端界面说明》§5.2、§5.8）。
  *
  * **提交后立刻跳转**：问答是异步的（生成要几十秒），提问页不该挂在那儿等。
  * 跳转后由运行详情页订阅 SSE 展示进度。
+ *
+ * ⚠️ **本页默认在会话里提问**（设计 §9.6）。这不是可有可无的：**第一轮如果不带 `session_id`，
+ * 后端就不知道上文，用户在运行页追问时补不出自足的问题**。所以第一次提交即开会话，
+ * 页面上给一个显式的「开始新会话」——**问不相干的问题时该先点它**，否则上文会把检索带偏。
  */
 export default function AskPage() {
   const screens = Grid.useBreakpoint();
@@ -39,6 +50,10 @@ export default function AskPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [cacheMissing, setCacheMissing] = useState(false);
+  // 会话状态是**浏览器本地**的（§9.6：会话 id 不进 Cookie、不进 URL）
+  const [conversation, setConversation] = useState<Conversation | null>(() =>
+    currentConversation(),
+  );
 
   const runs = useAsync<AnswerRun[]>(() => listRuns({ limit: 30 }), []);
   const rows = runs.data ?? [];
@@ -49,8 +64,17 @@ export default function AskPage() {
     setSubmitting(true);
     setError("");
     setCacheMissing(false);
+    // 没有会话就开一个——第一轮必须带上 session_id，否则后续追问接不上上文
+    const active = ensureConversation();
     try {
-      const run = await submitQuestion({ question: text, limit, max_new_tokens: maxTokens });
+      const run = await submitQuestion({
+        question: text,
+        limit,
+        max_new_tokens: maxTokens,
+        session_id: active.sessionId,
+      });
+      rememberTurn(active.sessionId, run.id, text);
+      setConversation(currentConversation());
       setQuestion("");
       navigate(`/answers/${run.id}`);
     } catch (reason) {
@@ -66,8 +90,30 @@ export default function AskPage() {
     }
   }
 
+  function newSession() {
+    setConversation(startConversation());
+    setError("");
+    setCacheMissing(false);
+  }
+
+  const turnCount = conversation?.turns.length ?? 0;
+
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
+      <Card size="small">
+        <Space wrap size={12}>
+          <Typography.Text>
+            {turnCount > 0 ? `当前会话：已问 ${turnCount} 轮，追问会带上文` : "当前是新会话"}
+          </Typography.Text>
+          <Button size="small" onClick={newSession} disabled={submitting}>
+            开始新会话
+          </Button>
+          <Typography.Text type="secondary">
+            问不相干的问题前请先开新会话——否则上一轮的上下文会把检索带偏。
+          </Typography.Text>
+        </Space>
+      </Card>
+
       <Card>
         <Form layout="vertical">
           <Form.Item

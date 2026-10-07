@@ -50,6 +50,10 @@ from app.modules.answering.evidence import (
 from app.modules.answering.runs import RunTracker, record_run
 from app.modules.answering.scope import DISCLAIMER, scope_notice
 
+# ⚠️ **按名字导入，不要导入模块本身**：本文件的第一个形参就叫 `session`（`AsyncSession`），
+# 导入一个叫 `session` 的模块会被参数名遮住。
+from app.modules.answering.session import compose_query, read_turns, record_turn
+
 # ⚠️ 这里**按名字导入**，不要写成 `from ... import verification`——`Answer` 有个同名字段
 # `verification`，而注解在类体里是先赋值后求值，模块名会被字段值（None）盖掉。
 from app.modules.answering.verification import VerificationResult, verify_claims
@@ -135,6 +139,12 @@ class Answer:
     #: 这次运行在 `answer_runs` 里的 id（`record=False` 或还没落库时为 None）。
     #: 调用方要靠它才能续跑澄清（`clarify-run --run <id>`）。
     run_id: UUID | None = None
+    #: 这次运行属于哪个会话（§9.6 多轮追问）。单轮问答为 None。
+    session_id: UUID | None = None
+    #: **补全后的自足问题**（§9.6）：`question` 是用户实际敲的那句（可能是「那如果是这样呢？」），
+    #: 这个字段是**拼上上文之后真正交给检索与模型的那句**。两者相同时为 None。
+    #: 分开记是为了**可追溯**——否则事后看 `question` 会以为系统答非所问。
+    resolved_question: str | None = None
     #: §20.2 要求每个正式输出都带的「不构成法律意见」声明。**恒有**，不是可选项。
     disclaimer: str = DISCLAIMER
     #: §20.2 要求标注的生成时间（ISO 8601，UTC）。
@@ -197,6 +207,7 @@ async def answer_question(
     principal: Principal,
     question: str,
     *,
+    session_id: UUID | None = None,
     limit: int = 5,
     max_new_tokens: int = 512,
     model: str | None = None,
@@ -208,26 +219,48 @@ async def answer_question(
     """检索 → 生成 → 核验 → 带引用返回，**并把这次运行记下来**（§9.1、§9.4）。
 
     `record=False` 只给「不想留痕」的调用方（目前只有性能探测用），默认都记。
+
+    `session_id` 非空时走**多轮追问**（§9.6）：先把追问补全成自足的问题再进链路。
+    **只有「问题」参与补全，历史答案不参与**——答案里的结论进了提示词就会变成模型的「依据」，
+    而它既没经过本轮的授权复核、也没绑定条款版本（§9.6 边界 1）。
     """
+    # §9.6：补全只影响「检索与提示用哪句问题」，链路本身仍是单轮的、门禁一条不少
+    resolved = question
+    if session_id is not None:
+        previous = await read_turns(cache, session_id, principal)
+        resolved = compose_query(previous, question)
+
     run = RunTracker()
     answer = await _answer_pipeline(
         session,
         principal,
-        question,
+        resolved,
         run,
         limit=limit,
         max_new_tokens=max_new_tokens,
         model=model,
         on_state=on_state,
     )
+    # `Answer` 是冻结的：把「用户实际敲的那句」与「实际处理的那句」分开记，否则事后看
+    # `question` 会以为系统答非所问（见字段注释）
+    answer = replace(
+        answer,
+        question=question,
+        session_id=session_id,
+        resolved_question=resolved if resolved != question else None,
+    )
     if record:
+        # 落库记**实际处理的那句**（`resolved`）——运行记录要描述这次运行真正跑了什么
         recorded = await _record(
-            session, principal, question, answer, run, limit, max_new_tokens, run_row
+            session, principal, resolved, answer, run, limit, max_new_tokens, run_row
         )
         if recorded is not None:
             # `Answer` 是冻结的，落库后才知道 run id——用 replace 补上，别为了这个把落库提前
             answer = replace(answer, run_id=recorded)
             await _cache_clarification(cache, recorded, question, answer)
+            if session_id is not None:
+                # 会话里记**用户实际敲的那句**（脱敏后）——它是下一轮要拼接的上文
+                await record_turn(cache, session_id, principal, question, answer, recorded)
     return answer
 
 

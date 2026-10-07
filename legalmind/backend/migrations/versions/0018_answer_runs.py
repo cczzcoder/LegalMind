@@ -62,11 +62,11 @@ def upgrade():
         sa.Column("reviewed_by", sa.Uuid(), nullable=True),
         sa.Column("reviewed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("review_note", sa.Text(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.CheckConstraint("state IN ('" + "', '".join(_STATES) + "')", name="ck_answer_run_state"),
-        sa.ForeignKeyConstraint(
-            ["organization_id"], ["organizations.id"], ondelete="RESTRICT"
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
+        sa.CheckConstraint("state IN ('" + "', '".join(_STATES) + "')", name="ck_answer_run_state"),
+        sa.ForeignKeyConstraint(["organization_id"], ["organizations.id"], ondelete="RESTRICT"),
         sa.ForeignKeyConstraint(["requested_by"], ["users.id"], ondelete="RESTRICT"),
         sa.ForeignKeyConstraint(["reviewed_by"], ["users.id"], ondelete="RESTRICT"),
         sa.PrimaryKeyConstraint("id"),

@@ -45,10 +45,12 @@ from app.models import (
     SENSITIVITY_LEVELS,
     SOURCE_TYPES,
     TRUST_LEVELS,
+    AnswerRun,
     Organization,
     User,
     UserRole,
 )
+from app.modules.answering import runs as answering_runs
 from app.modules.answering import service as answering_service
 from app.modules.authorization.service import (
     DOCUMENT_READ,
@@ -237,6 +239,77 @@ async def ask_command(
                 f"  [{index}] {citation.instrument_title} {citation.provision_display}"
                 f"（效力状态：{citation.legal_status}，版本 {citation.provision_version_id}）"
             )
+
+
+async def answer_runs_command(username: str, limit: int, pending_only: bool) -> None:
+    """列出问答运行记录（设计 §9.1、§9.4）；`--pending` 只看待人工复核的（§9.3 第三层）。
+
+    **只显示元数据、证据引用与配置快照**——运行记录里本来就没有问题与回答正文（§21
+    「客户数据不落库」，正文只留 sha256）。
+    """
+    async with SessionFactory() as session:
+        try:
+            async with session.begin():
+                principal = await cli_principal(session, username, REVIEW_DECIDE)
+            if pending_only:
+                rows = await answering_runs.pending_reviews(session, principal, limit=limit)
+            else:
+                statement = (
+                    select(AnswerRun)
+                    .where(AnswerRun.organization_id == principal.organization_id)
+                    .order_by(AnswerRun.created_at.desc())
+                    .limit(limit)
+                )
+                rows = list(await session.scalars(statement))
+        except HTTPException as error:
+            sys.exit(f"{error.status_code}: {error.detail}")
+        finally:
+            await engine.dispose()
+
+    title = "待人工复核" if pending_only else "最近"
+    print(f"{title}问答运行 {len(rows)} 条：")
+    for row in rows:
+        flag = (
+            "待审"
+            if row.review_required and row.reviewed_at is None
+            else "已复核"
+            if row.reviewed_at
+            else "—"
+        )
+        print(
+            f"  {row.id}  {row.state:<22} {flag:<4} 发布={row.published} "
+            f"门禁={row.blocked_by or '—'} 证据={len(row.evidence)} 条 "
+            f"{row.created_at:%Y-%m-%d %H:%M}"
+        )
+    if pending_only and rows:
+        print()
+        print("复核：python -m app.cli review-run --as <用户名> --run <id> --note '...'")
+
+
+async def review_run_command(username: str, run_id: str, note: str | None) -> None:
+    """标记一条待审运行已人工复核（设计 §9.3 第三层）；需 review.decide。
+
+    ⚠️ 复核**不改变运行状态**——状态机记的是「当时怎么走的」，复核是之后发生的另一件事，
+    结论写在 `review_note` 里（并写审计）。
+    """
+    async with SessionFactory() as session:
+        try:
+            async with session.begin():
+                principal = await cli_principal(session, username, REVIEW_DECIDE)
+                run = await answering_runs.mark_reviewed(
+                    session, principal, UUID(run_id), note=note
+                )
+        except HTTPException as error:
+            sys.exit(f"{error.status_code}: {error.detail}")
+        except (LookupError, ValueError) as error:
+            sys.exit(str(error))
+        finally:
+            await engine.dispose()
+
+    print(f"已复核：{run.id}（状态 {run.state}，门禁 {run.blocked_by or '—'}）")
+    print(f"复核人：{run.reviewed_by}　时间：{run.reviewed_at}")
+    if run.review_note:
+        print(f"备注：{run.review_note}")
 
 
 async def flag_stale_pages_command(username: str, dry_run: bool) -> None:
@@ -786,6 +859,20 @@ def main() -> None:
     ask.add_argument("--max-new-tokens", type=int, default=512, help="最多生成多少 token")
     ask.add_argument("--model", default=None, help="覆盖生成模型（默认取配置里的）")
 
+    answer_runs = commands.add_parser(
+        "answer-runs", help="列出问答运行记录；--pending 只看待人工复核（设计 §9.1、§9.3）"
+    )
+    answer_runs.add_argument("--as", dest="actor", required=True, help="执行操作的用户名")
+    answer_runs.add_argument("--limit", type=int, default=20, help="最多列出多少条（默认 20）")
+    answer_runs.add_argument("--pending", action="store_true", help="只看待人工复核的")
+
+    review_run = commands.add_parser(
+        "review-run", help="标记一条待审运行已人工复核（设计 §9.3 第三层）"
+    )
+    review_run.add_argument("--as", dest="actor", required=True, help="执行操作的用户名")
+    review_run.add_argument("--run", required=True, help="运行记录 id")
+    review_run.add_argument("--note", default=None, help="复核备注")
+
     worker = commands.add_parser(
         "run-worker", help="按需启动单进程 worker，领取并处理后台任务（设计 12.2）"
     )
@@ -886,6 +973,14 @@ def main() -> None:
         asyncio.run(
             ask_command(args.actor, args.question, args.limit, args.max_new_tokens, args.model)
         )
+        return
+
+    if args.command == "answer-runs":
+        asyncio.run(answer_runs_command(args.actor, args.limit, args.pending))
+        return
+
+    if args.command == "review-run":
+        asyncio.run(review_run_command(args.actor, args.run, args.note))
         return
 
     if args.command == "flag-stale-pages":

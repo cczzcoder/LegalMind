@@ -28,6 +28,7 @@
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from hashlib import sha256
 from time import perf_counter
 from uuid import UUID
 
@@ -45,6 +46,7 @@ from app.modules.answering.evidence import (
     build_messages,
     evidence_display,
 )
+from app.modules.answering.runs import RunTracker, record_run
 from app.modules.answering.scope import DISCLAIMER, scope_notice
 
 # ⚠️ 这里**按名字导入**，不要写成 `from ... import verification`——`Answer` 有个同名字段
@@ -179,8 +181,75 @@ async def answer_question(
     limit: int = 5,
     max_new_tokens: int = 512,
     model: str | None = None,
+    record: bool = True,
 ) -> Answer:
-    """检索 → 生成 → 核验 → 带引用返回。**检索为空就拒答，不调用模型。**
+    """检索 → 生成 → 核验 → 带引用返回，**并把这次运行记下来**（§9.1、§9.4）。
+
+    `record=False` 只给「不想留痕」的调用方（目前只有性能探测用），默认都记。
+    """
+    run = RunTracker()
+    answer = await _answer_pipeline(
+        session, principal, question, run, limit=limit, max_new_tokens=max_new_tokens, model=model
+    )
+    if record:
+        await _record(session, principal, question, answer, run, limit, max_new_tokens)
+    return answer
+
+
+async def _record(
+    session: AsyncSession,
+    principal: Principal,
+    question: str,
+    answer: Answer,
+    run: RunTracker,
+    limit: int,
+    max_new_tokens: int,
+) -> None:
+    """落库这次运行。**只记元数据、证据引用与配置快照**，问题与回答正文只留 sha256（§21）。"""
+    settings = get_settings()
+    config = {
+        "model": answer.model or settings.generation_model,
+        "retrieval_path": answer.path,
+        "limit": limit,
+        "max_new_tokens": max_new_tokens,
+        "context_tokens": settings.generation_context_tokens,
+        "embedding_model": settings.embedding_model,
+        # 提示词没有版本号，用哈希代替——复核时要能判断「是不是换了提示词之后才变成这样」
+        "instructions_sha256": sha256(INSTRUCTIONS.encode("utf-8")).hexdigest(),
+    }
+    # 调用方可能已经开了事务（测试与未来的 API 层），两种都支持
+    if session.in_transaction():
+        await record_run(
+            session,
+            principal=principal,
+            question=question,
+            answer=answer,
+            tracker=run,
+            config=config,
+        )
+    else:
+        async with session.begin():
+            await record_run(
+                session,
+                principal=principal,
+                question=question,
+                answer=answer,
+                tracker=run,
+                config=config,
+            )
+
+
+async def _answer_pipeline(
+    session: AsyncSession,
+    principal: Principal,
+    question: str,
+    run: RunTracker,
+    *,
+    limit: int,
+    max_new_tokens: int,
+    model: str | None,
+) -> Answer:
+    """真正的链路。**每个出口都声明自己停在哪个状态**（§9.1）——状态不是日志，是转移表的一部分。
 
     **两道确定性门禁都在这一层，都不问模型**：
 
@@ -191,12 +260,14 @@ async def answer_question(
       门禁后发送」）。
     """
     started = perf_counter()
+    run.to("RETRIEVING")
     # 复用 P4 的检索：`semantic` 走级联（先关键词、命中为空才向量），并做授权复核与未生效屏蔽
     search = await search_provisions(
         session, principal, SearchQuery(semantic=question, limit=limit)
     )
     hits = list(search.hits)
     if not hits:
+        run.to("INSUFFICIENT_EVIDENCE")
         return Answer(
             question=question,
             answer=NO_EVIDENCE,
@@ -221,6 +292,7 @@ async def answer_question(
     if notice is not None and len(non_current_citations(citations)) == len(citations):
         # 全部依据都不是现行有效：**生成结论没有意义**——拿一部尚未生效或已被取代的法律去
         # 下结论，正是 §8.3 要防的那件事。不调用模型，只把提示与条文交回人工（§9.5）。
+        run.to("NEEDS_REVIEW")
         return Answer(
             question=question,
             answer=notice,
@@ -238,6 +310,7 @@ async def answer_question(
         # 问题问的是本人情形，就**不生成个人结论**，只把条文与下一步交回提问者。
         # 实测模型会在这种问题上加一句「因此，作为特困人员，可以领取社会救助」——引用没错、
         # 内容也没错，但那一步「你能领」正是越界的地方，而且它还跳过了「须经认定程序」这个前提。
+        run.to("NEEDS_REVIEW")
         return Answer(
             question=question,
             answer=personal,
@@ -252,6 +325,7 @@ async def answer_question(
 
     if not generation.available(model_name):
         # **不回落外部服务**：本地模型不可用就如实降级成「只给证据 + 转人工」（§9.5）
+        run.to("FAILED")
         return Answer(
             question=question,
             answer=MODEL_UNAVAILABLE,
@@ -264,6 +338,7 @@ async def answer_question(
 
     # 上下文预算（§8.2 第 9 步、§9.4）：检索只限条数不限长度，装不下时推理引擎会**静默从前面
     # 截断**——而指令就在提示最前面，那等于模型先失去全部约束。所以这里自己算、自己如实报告。
+    run.to("ASSEMBLING_EVIDENCE")
     assembly = assemble_evidence(
         hits,
         question,
@@ -273,6 +348,7 @@ async def answer_question(
     )
     if not assembly.included:
         # 一条都装不下：不生成结论，只把条文与提示交回人工（§9.4「限制回答范围或转人工」）
+        run.to("NEEDS_REVIEW")
         return Answer(
             question=question,
             answer=assembly.notice,
@@ -284,6 +360,7 @@ async def answer_question(
             evidence_notice=assembly.notice,
         )
 
+    run.to("GENERATING")
     text = generation.generate(
         model_name,
         build_messages(assembly.included, question),
@@ -295,6 +372,7 @@ async def answer_question(
     parsed = claims.parse(text)
     if not parsed.ok:
         # 模型没按约定输出结构化结果：**不当正式答案发布**，原始输出留给人工
+        run.to("NEEDS_REVIEW")
         return Answer(
             question=question,
             answer=STRUCTURE_FAILED_NOTICE.format(reason=parsed.error),
@@ -309,9 +387,11 @@ async def answer_question(
         )
 
     # 核验对着**模型实际看到的那几条**——它没见过的条文不可能被它正确引用
+    run.to("VERIFYING")
     result = verify_claims(parsed.answer, question, assembly.included)
     if not result.ok:
         # §9.3 第一层没过：不当正式答案发布，但草稿留着给人工（§9.4「正式答案通过门禁后发送」）
+        run.to("NEEDS_REVIEW")
         return Answer(
             question=question,
             answer=VERIFICATION_FAILED_NOTICE.format(issues=result.summary()),
@@ -326,6 +406,8 @@ async def answer_question(
             blocked_by="verification",
         )
 
+    # `PARTIAL` = 发布了但**限定了回答范围**（§9.4「证据无法完整装配时，限制回答范围或转人工」）
+    run.to("PARTIAL" if assembly.notice else "ANSWERED")
     return Answer(
         question=question,
         answer=claims.render(parsed.answer, evidence_display(assembly.included)),

@@ -1,0 +1,503 @@
+{
+  "version": 1,
+  "built_on": "2026-10-07",
+  "corpus": "法律文献/ 20 份样本语料（13 本体 / 2403 条款版本）",
+  "purpose": "设计 §9.3 第二层的语义校验（「证据是否支持主张」等四项）的**断言级金标准**：把「一条主张 + 它引用的条文」摆出来，标注这条主张是否真的被条文支持。用于度量本地模型当判官靠不靠得住。",
+  "design": {
+    "why_a_gold_standard": "第二层是**语义判断**，不能像第一层那样靠集合运算做。而「让模型去判模型」如果没有一把尺子，就只是把信任从一处搬到另一处。所以先造一批**已知好坏**的断言，量清楚判官抓得住什么、漏掉什么。",
+    "claims_are_verifiable": "每条断言的期望结论都能**对着条文原文复核**：好断言是条文原话（或同义改写）；坏断言各有明确缺陷，note 里写明它错在哪、正确说法在条文哪一句。",
+    "defect_kinds": "坏断言的缺陷类型（§9.3 第二层四项的落地）：not_supported（证据不支持）、over_generalized（过度概括）、missing_condition（漏条件）、missing_exception（漏例外）、contradicts（与证据相反）、misattributed（引错了条款）。",
+    "asymmetry": "两类错误代价不同：**放行坏断言**（漏判）会让错误结论出到用户面前；**拦下好断言**（误判）只是多转一次人工。所以阈值不对称——见 thresholds_note。",
+    "held_out": "`held_out: true` 的用例是**在提示词调过两轮之后**才加的，用来检验判官是不是被调得只认那 21 条。全量与留出两套数字都要看——**只看全量等于自证。**"
+  },
+  "thresholds": {
+    "defect_detection_rate": 0.9,
+    "supported_acceptance_rate": 0.8
+  },
+  "thresholds_note": "**缺陷检出率**（坏断言被拦下的比例）要求 ≥ 0.9——放行坏断言是这一层存在的理由，抓不住就没有意义。**好断言接受率**只要 ≥ 0.8——判官过于谨慎只是多转一次人工，比漏判安全。**刻意不要求 1.0**：语义判断没有确定答案，要求满分只会逼着把规则调到过拟合。 **留出用例（`held_out: true`）是调过两轮提示词之后才加的**，专门用来检验判官是不是被调得只认前 21 条——实测就是这么发现的：前 21 条 21/21，留出 7 条只对 5 条（0.714），全量缺陷检出率落到 0.857。**阈值不因为没达标而下调**——阈值按产品需要定，不照得分反推。",
+  "cases": [
+    {
+      "id": "g01",
+      "question": "工资怎么发放？",
+      "evidence": [
+        [
+          "中华人民共和国劳动法",
+          "50"
+        ]
+      ],
+      "claim": "工资应当以货币形式按月支付给劳动者本人。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": true,
+      "defect": null,
+      "note": "条文原话"
+    },
+    {
+      "id": "g02",
+      "question": "用人单位无故不缴纳社会保险费会被怎么处理？",
+      "evidence": [
+        [
+          "中华人民共和国劳动法",
+          "100"
+        ]
+      ],
+      "claim": "用人单位无故不缴纳社会保险费的，由劳动行政部门责令其限期缴纳。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": true,
+      "defect": null,
+      "note": "条文原话"
+    },
+    {
+      "id": "g03",
+      "question": "航空器偏离航路时管制单位应当怎么做？",
+      "evidence": [
+        [
+          "中华人民共和国民用航空法",
+          "87"
+        ]
+      ],
+      "claim": "空中交通管制单位发现民用航空器偏离指定航路、迷失航向时，应当迅速采取一切必要措施，使其回归航路。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": true,
+      "defect": null,
+      "note": "条文原话"
+    },
+    {
+      "id": "g04",
+      "question": "审计工作底稿要存放在哪里？",
+      "evidence": [
+        [
+          "中华人民共和国注册会计师法",
+          "45"
+        ]
+      ],
+      "claim": "审计工作底稿和审计档案应当存放在中国境内。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": true,
+      "defect": null,
+      "note": "条文原话"
+    },
+    {
+      "id": "g05",
+      "question": "探矿权一次批多久、能不能续？",
+      "evidence": [
+        [
+          "中华人民共和国矿产资源法实施条例",
+          "15"
+        ]
+      ],
+      "claim": "探矿权的期限为5年，期限届满可以续期。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": true,
+      "defect": null,
+      "note": "条文原话（条文还写了续期次数上限，但主张没超出它）"
+    },
+    {
+      "id": "g06",
+      "question": "社会救助分为哪几类？",
+      "evidence": [
+        [
+          "中华人民共和国社会救助法",
+          "15"
+        ]
+      ],
+      "claim": "社会救助分为基本生活救助、专项社会救助和急难社会救助。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": true,
+      "defect": null,
+      "note": "条文原话"
+    },
+    {
+      "id": "g07",
+      "question": "行政区域怎么划分？",
+      "evidence": [
+        [
+          "中华人民共和国宪法",
+          "30"
+        ]
+      ],
+      "claim": "全国分为省、自治区、直辖市；省、自治区分为自治州、县、自治县、市。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": true,
+      "defect": null,
+      "note": "条文原话"
+    },
+    {
+      "id": "g08",
+      "question": "药品网络交易第三方平台要建立什么质量管理体系？",
+      "evidence": [
+        [
+          "中华人民共和国药品管理法实施条例",
+          "45"
+        ]
+      ],
+      "claim": "药品网络交易第三方平台提供者应当建立健全药品网络销售质量管理体系。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": true,
+      "defect": null,
+      "note": "条文原话"
+    },
+    {
+      "id": "g09",
+      "question": "广播电视的用语用字有什么要求？",
+      "evidence": [
+        [
+          "中华人民共和国国家通用语言文字法",
+          "15"
+        ]
+      ],
+      "claim": "广播、电影、电视用语用字应当以国家通用语言文字为基本的用语用字。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": true,
+      "defect": null,
+      "note": "条文原话（第十五条第一项）"
+    },
+    {
+      "id": "g10",
+      "question": "逾期不缴社会保险费会怎样？",
+      "evidence": [
+        [
+          "中华人民共和国劳动法",
+          "100"
+        ]
+      ],
+      "claim": "用人单位逾期不缴纳社会保险费的，可以加收滞纳金。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": true,
+      "defect": null,
+      "note": "条文原话——注意条文用的是「可以」而不是「应当」，主张保留了裁量语气"
+    },
+    {
+      "id": "g11",
+      "question": "特困人员怎么供养？",
+      "evidence": [
+        [
+          "中华人民共和国社会救助法",
+          "16"
+        ]
+      ],
+      "claim": "特困人员可以在供养服务机构集中供养，也可以在家分散供养。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": true,
+      "defect": null,
+      "note": "条文原话"
+    },
+    {
+      "id": "b01",
+      "question": "社会保险费怎么缴？",
+      "evidence": [
+        [
+          "中华人民共和国劳动法",
+          "100"
+        ]
+      ],
+      "claim": "用人单位必须为所有劳动者缴纳社会保险费。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": false,
+      "defect": "over_generalized",
+      "note": "第一百条只说「无故不缴纳的」由劳动行政部门责令限期缴纳，**没有**规定缴纳义务的范围与对象——「必须为所有劳动者缴纳」是加进去的"
+    },
+    {
+      "id": "b02",
+      "question": "工资怎么发放？",
+      "evidence": [
+        [
+          "中华人民共和国劳动法",
+          "50"
+        ]
+      ],
+      "claim": "工资可以用实物发放。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": false,
+      "defect": "contradicts",
+      "note": "条文写的是「工资应当以货币形式按月支付」——主张与条文**相反**"
+    },
+    {
+      "id": "b03",
+      "question": "克扣工资会被怎么处理？",
+      "evidence": [
+        [
+          "中华人民共和国劳动法",
+          "100"
+        ]
+      ],
+      "claim": "用人单位克扣劳动者工资的，由劳动行政部门责令支付赔偿金。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": false,
+      "defect": "misattributed",
+      "note": "「克扣工资→责令支付工资报酬、经济补偿、赔偿金」在**第九十一条**，不在第一百条（第一百条讲的是社保费）"
+    },
+    {
+      "id": "b04",
+      "question": "探矿权能续几次？",
+      "evidence": [
+        [
+          "中华人民共和国矿产资源法实施条例",
+          "15"
+        ]
+      ],
+      "claim": "探矿权续期最多不超过5次，每次期限为5年。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": false,
+      "defect": "not_supported",
+      "note": "条文是「续期最多不超过**3次**，每次期限为5年」——次数被改了"
+    },
+    {
+      "id": "b05",
+      "question": "采矿权期满怎么办？",
+      "evidence": [
+        [
+          "中华人民共和国矿产资源法实施条例",
+          "15"
+        ]
+      ],
+      "claim": "采矿权期限届满的，一律不予续期。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": false,
+      "defect": "missing_exception",
+      "note": "条文有例外：「登记的开采区域内仍有可供开采的矿产资源的，可以续期」——主张把例外抹掉了"
+    },
+    {
+      "id": "b06",
+      "question": "逾期不缴社会保险费会怎样？",
+      "evidence": [
+        [
+          "中华人民共和国劳动法",
+          "100"
+        ]
+      ],
+      "claim": "用人单位逾期不缴纳社会保险费的，应当加收滞纳金。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": false,
+      "defect": "over_generalized",
+      "note": "条文是「**可以**加收滞纳金」——把裁量说成了义务"
+    },
+    {
+      "id": "b07",
+      "question": "谁能获得特困人员供养？",
+      "evidence": [
+        [
+          "中华人民共和国社会救助法",
+          "16"
+        ]
+      ],
+      "claim": "老年人均可以获得特困人员供养。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": false,
+      "defect": "missing_condition",
+      "note": "条文有前置条件：「无劳动能力、无生活来源且无法定赡养、抚养、扶养义务人，或者其法定义务人无履行义务能力」——主张把条件删了"
+    },
+    {
+      "id": "b08",
+      "question": "审计工作底稿能带出境吗？",
+      "evidence": [
+        [
+          "中华人民共和国注册会计师法",
+          "45"
+        ]
+      ],
+      "claim": "注册会计师执行审计业务形成的审计工作底稿可以携带出境。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": false,
+      "defect": "contradicts",
+      "note": "条文写的是「除国家另有规定外，任何单位或者个人**不得**擅自携带、传递审计工作底稿或者审计档案出境」"
+    },
+    {
+      "id": "b09",
+      "question": "审计工作底稿怎么保存？",
+      "evidence": [
+        [
+          "中华人民共和国注册会计师法",
+          "45"
+        ]
+      ],
+      "claim": "审计工作底稿应当存放在中国境内，且不得以电子形式保存。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": false,
+      "defect": "not_supported",
+      "note": "前半句对，**后半句是加的**——条文完全没提电子形式"
+    },
+    {
+      "id": "b10",
+      "question": "劳动争议调解委员会由谁组成？",
+      "evidence": [
+        [
+          "中华人民共和国劳动法",
+          "80"
+        ]
+      ],
+      "claim": "劳动争议调解委员会由职工代表、用人单位代表和工会代表组成，主任由用人单位代表担任。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": false,
+      "defect": "not_supported",
+      "note": "组成人员对，但条文写的是「主任由**工会代表**担任」——细节被改了"
+    },
+    {
+      "id": "h01",
+      "held_out": true,
+      "question": "身份不明又付不起急救费的危重伤病员谁来管？",
+      "evidence": [
+        [
+          "中华人民共和国社会救助法",
+          "30"
+        ]
+      ],
+      "claim": "对需要急救但身份不明或者无力支付急救费用的急危重伤病患者，由社会救助管理部门给予疾病应急救助。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": true,
+      "defect": null,
+      "note": "留出用例：条文原话（略去「且符合规定的」这一定语，属少说）"
+    },
+    {
+      "id": "h02",
+      "held_out": true,
+      "question": "谁能获得疾病应急救助？",
+      "evidence": [
+        [
+          "中华人民共和国社会救助法",
+          "30"
+        ]
+      ],
+      "claim": "所有无力支付急救费用的患者都可以获得疾病应急救助。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": false,
+      "defect": "over_generalized",
+      "note": "留出用例：条文限于「急危重伤病患者」且要「符合规定」——主张放成了「所有患者」"
+    },
+    {
+      "id": "h03",
+      "held_out": true,
+      "question": "机长不能履职由谁代理？",
+      "evidence": [
+        [
+          "中华人民共和国民用航空法",
+          "50"
+        ]
+      ],
+      "claim": "机长因故不能履行职务的，由民用航空器所有人代理机长。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": false,
+      "defect": "not_supported",
+      "note": "留出用例：条文是「由仅次于机长职务的驾驶员代理机长」，所有人／承租人的角色是「指派新机长接任」——主体被换了"
+    },
+    {
+      "id": "h04",
+      "held_out": true,
+      "question": "机长不能履职由谁代理？",
+      "evidence": [
+        [
+          "中华人民共和国民用航空法",
+          "50"
+        ]
+      ],
+      "claim": "机长因故不能履行职务的，由仅次于机长职务的驾驶员代理机长。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": true,
+      "defect": null,
+      "note": "留出用例：条文原话"
+    },
+    {
+      "id": "h05",
+      "held_out": true,
+      "question": "国家发展规划实施中要不要评估？",
+      "evidence": [
+        [
+          "中华人民共和国国家发展规划法",
+          "30"
+        ]
+      ],
+      "claim": "国务院应当每半年对国家发展规划实施情况进行一次评估。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": false,
+      "defect": "not_supported",
+      "note": "留出用例：条文说的是「中期阶段」组织中期评估，没有「每半年一次」——条文没有的义务"
+    },
+    {
+      "id": "h06",
+      "held_out": true,
+      "question": "审计工作底稿能带出境吗？",
+      "evidence": [
+        [
+          "中华人民共和国注册会计师法",
+          "45"
+        ]
+      ],
+      "claim": "任何单位或者个人在任何情况下都不得携带审计工作底稿出境。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": false,
+      "defect": "missing_exception",
+      "note": "留出用例：条文开头就是「除国家另有规定外」——主张用「任何情况下都」把例外抹掉了"
+    },
+    {
+      "id": "h07",
+      "held_out": true,
+      "question": "药品储存运输有什么要求？",
+      "evidence": [
+        [
+          "中华人民共和国药品管理法实施条例",
+          "44"
+        ]
+      ],
+      "claim": "药品上市许可持有人、药品经营企业储存、运输药品，应当采取有效措施保证药品质量。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": true,
+      "defect": null,
+      "note": "留出用例：条文原话的压缩改写"
+    }
+  ]
+}

@@ -8,6 +8,7 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from app.core.config import get_settings
 from app.core.database import engine
 from app.core.errors import register_error_handling
+from app.modules.answering.router import router as answering_router
 from app.modules.documents.router import router as documents_router
 from app.modules.identity.router import router as identity_router
 from app.modules.retrieval.router import router as retrieval_router
@@ -43,6 +44,7 @@ app.include_router(wiki_router, prefix="/api/v1")
 app.include_router(sources_router, prefix="/api/v1")
 app.include_router(documents_router, prefix="/api/v1")
 app.include_router(retrieval_router, prefix="/api/v1")
+app.include_router(answering_router, prefix="/api/v1")
 
 
 @app.get("/health/live", tags=["health"])

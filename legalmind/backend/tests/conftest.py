@@ -8,6 +8,9 @@ from uuid import uuid4
 os.environ["APP_ENV"] = "test"
 os.environ["DATABASE_URL"] = "postgresql+asyncpg://unused:unused@localhost/unused"
 os.environ["TRUSTED_PROXIES"] = ""
+# ⚠️ **测试不连真 Redis**：`CACHE_URL` 从环境继承（本机开发时 shell 里就有），不显式清空的话
+# 测试会去连真实缓存——既依赖外部服务，又会污染真实数据。需要缓存的用例自己注入内存替身。
+os.environ["CACHE_URL"] = ""
 
 from cryptography.fernet import Fernet
 

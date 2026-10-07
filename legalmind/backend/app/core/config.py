@@ -63,6 +63,10 @@ class Settings(BaseSettings):
     cache_url: str = ""
     # 缓存 TTL（秒），默认 24 小时。**到期即焚**——数据最小化，不进主库也不进备份。
     answer_cache_ttl_seconds: int = 86400
+    # SSE 流式等待上限（秒）与轮询间隔（秒）。**超时如实推 `timeout` 事件后结束**，
+    # 不假装还在跑——运行仍在后台继续，调用方可改用 GET /answers/{id} 查询。
+    answer_stream_timeout_seconds: int = 300
+    answer_stream_poll_seconds: float = 0.5
 
     # 模型权重下载源。本机 HuggingFace 直连不通，默认走镜像（其元数据 API 403 不影响下载）。
     hf_endpoint: str = "https://hf-mirror.com"

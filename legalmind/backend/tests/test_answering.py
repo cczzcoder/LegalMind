@@ -253,6 +253,62 @@ async def test_oversized_evidence_refuses_instead_of_truncating(
     assert answer.evidence_notice is not None
 
 
+async def test_unavailable_model_degrades_to_evidence_only(monkeypatch, session_factory, make_user):
+    """§9.5：本地模型不可用就**如实降级**成「只给检索到的依据 + 转人工」，不回落外部服务。"""
+    monkeypatch.setattr(generation, "available", lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        service,
+        "search_provisions",
+        _pinned_search([_hit("中华人民共和国某法", "1", "第一条　……")]),
+    )
+    user = await make_user("reader")
+    principal = Principal(
+        organization_id=user.organization_id, user_id=user.id, roles=frozenset({"reader"})
+    )
+
+    async with session_factory() as session:
+        answer = await service.answer_question(session, principal, "某法怎么规定的？")
+
+    assert answer.answer == service.MODEL_UNAVAILABLE
+    assert answer.model is None
+    assert len(answer.citations) == 1
+
+
+async def test_generation_failure_degrades_instead_of_raising(
+    monkeypatch, session_factory, make_user
+):
+    """⚠️ **「探测得到」≠「用得了」**（V1.36）。
+
+    `available()` 只查 `/api/tags`，而 Ollama 在 runner 缺失时**照样返回模型列表**——实测调用
+    统一 500、`/api/tags` 却完全正常。所以真正的兜底必须在**调用处**：生成失败要走与「探测为假」
+    完全一样的降级路，而不是把 urllib 的异常冒成一次 500。
+    """
+
+    def explode(*_args, **_kwargs):
+        raise generation.GenerationUnavailable(
+            "本地生成模型调用失败：llama-server binary not found"
+        )
+
+    monkeypatch.setattr(generation, "available", lambda *_a, **_k: True)
+    monkeypatch.setattr(generation, "generate", explode)
+    monkeypatch.setattr(
+        service,
+        "search_provisions",
+        _pinned_search([_hit("中华人民共和国某法", "1", "第一条　……")]),
+    )
+    user = await make_user("reader")
+    principal = Principal(
+        organization_id=user.organization_id, user_id=user.id, roles=frozenset({"reader"})
+    )
+
+    async with session_factory() as session:
+        answer = await service.answer_question(session, principal, "某法怎么规定的？")
+
+    assert answer.answer == service.MODEL_UNAVAILABLE
+    assert answer.model is None
+    assert len(answer.citations) == 1
+
+
 async def test_partial_assembly_answers_but_limits_the_scope(
     monkeypatch, session_factory, make_user
 ):

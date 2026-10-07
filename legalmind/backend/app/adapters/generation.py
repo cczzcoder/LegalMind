@@ -85,6 +85,17 @@ def download(name: str, *, force: bool = False) -> Path:
     return directory
 
 
+class GenerationUnavailable(RuntimeError):
+    """本地生成模型**调用失败**（服务没在跑、runner 缺失、模型没加载等）。
+
+    ⚠️ **`available()` 通过 ≠ 调用一定成功**：它只查 ``/api/tags``，而 Ollama 在 runner 缺失时
+    照样返回模型列表——实测 v0.40.0 自动更新事故里 ``llama-server binary not found``、模型调用
+    统一 500，而 ``ollama list`` 与 ``/api/tags`` **完全正常**。所以**探测只是前置条件，真正的
+    兜底必须在调用处**：调用失败就在这里如实报「不可用」，由调用方降级成「只给证据 + 转人工」，
+    **绝不回落外部服务**（§9.5）。
+    """
+
+
 def _post(path: str, payload: dict, *, timeout: float) -> dict:
     request = urllib.request.Request(
         f"{get_settings().ollama_host.rstrip('/')}{path}",
@@ -97,7 +108,11 @@ def _post(path: str, payload: dict, *, timeout: float) -> dict:
 
 
 def available(name: str) -> bool:
-    """本地模型是否真的可用——**不可用就是不可用**，由调用方如实降级，不做任何外部回落。"""
+    """本地模型**看起来**可用——**不可用就是不可用**，由调用方如实降级，不做任何外部回落。
+
+    ⚠️ **这是前置条件检查，不是保证**：它只确认「Ollama 服务在响应」+「模型列表里有这个名字」，
+    **证明不了 runner 能用**。真正调用失败由 `generate()` 抛 `GenerationUnavailable` 兜底。
+    """
     try:
         request = urllib.request.Request(f"{get_settings().ollama_host.rstrip('/')}/api/tags")
         with urllib.request.urlopen(request, timeout=5) as response:
@@ -134,5 +149,11 @@ def generate(
     }
     if schema is not None:
         payload["format"] = schema
-    result = _post("/api/chat", payload, timeout=timeout)
+    try:
+        result = _post("/api/chat", payload, timeout=timeout)
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+        # ⚠️ 别让 urllib 的异常直接冒到上层——那会变成一次 500，而 §9.5 要的是**如实降级**。
+        # `HTTPError`（含 runner 缺失时的 500）是 `URLError` 的子类，`TimeoutError` 是 `OSError`
+        # 的子类，都在这里收住。
+        raise GenerationUnavailable(f"本地生成模型调用失败：{name}（{exc}）") from exc
     return (result.get("message") or {}).get("content", "").strip()

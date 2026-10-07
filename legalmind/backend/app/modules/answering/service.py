@@ -442,9 +442,12 @@ async def _answer_pipeline(
             blocked_by="scope",
         )
 
-    if not generation.available(model_name):
-        # **不回落外部服务**：本地模型不可用就如实降级成「只给证据 + 转人工」（§9.5）
-        await _advance(run, "FAILED", on_state)
+    def unavailable() -> Answer:
+        """本地模型不可用时的**如实降级**：只给检索到的依据 + 转人工，**不回落外部服务**（§9.5）。
+
+        两条入口共用它：① `available()` 探测为假；② **探测通过但真正调用失败**（见下面
+        `GenerationUnavailable` 那段）——两处的降级必须一模一样，否则「不可用」就有了两种语义。
+        """
         return Answer(
             question=question,
             answer=MODEL_UNAVAILABLE,
@@ -454,6 +457,10 @@ async def _answer_pipeline(
             seconds=perf_counter() - started,
             status_notice=notice,
         )
+
+    if not generation.available(model_name):
+        await _advance(run, "FAILED", on_state)
+        return unavailable()
 
     # 上下文预算（§8.2 第 9 步、§9.4）：检索只限条数不限长度，装不下时推理引擎会**静默从前面
     # 截断**——而指令就在提示最前面，那等于模型先失去全部约束。所以这里自己算、自己如实报告。
@@ -480,13 +487,21 @@ async def _answer_pipeline(
         )
 
     await _advance(run, "GENERATING", on_state)
-    text = generation.generate(
-        model_name,
-        build_messages(assembly.included, question),
-        max_new_tokens=max_new_tokens,
-        # **约束解码**：只写 format="json" 挡不住残缺 JSON（见 generation.generate 的注释）
-        schema=claims.SCHEMA,
-    )
+    try:
+        text = generation.generate(
+            model_name,
+            build_messages(assembly.included, question),
+            max_new_tokens=max_new_tokens,
+            # **约束解码**：只写 format="json" 挡不住残缺 JSON（见 generation.generate 的注释）
+            schema=claims.SCHEMA,
+        )
+    except generation.GenerationUnavailable:
+        # ⚠️ **「探测得到」≠「用得了」**（V1.36）：`available()` 只查 `/api/tags`，而 Ollama 在
+        # runner 缺失时**照样返回模型列表**——实测调用统一 500、`/api/tags` 却完全正常。所以
+        # 探测只是前置条件，**真正的兜底在调用处**：失败就与探测为假时走同一条降级路，
+        # 而不是把 urllib 的异常变成一次 500（§9.5「不回落外部服务」）。
+        await _advance(run, "FAILED", on_state)
+        return unavailable()
     # §9.2：模型只给「主张 + 证据编号」，引用由服务端从编号渲染——所以先解析，再核验，再渲染
     parsed = claims.parse(text)
     if not parsed.ok:

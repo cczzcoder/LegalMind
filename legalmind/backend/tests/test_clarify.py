@@ -11,6 +11,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import select
 
+from app.adapters.generation import GenerationUnavailable
 from app.core.security import Principal
 from app.models import AnswerRun, Job
 from app.modules.answering import clarify, service
@@ -97,6 +98,21 @@ def test_model_failure_falls_back_to_the_template():
 
     def broken(_messages, schema=None):
         raise OSError("ollama is down")
+
+    asked = clarify.clarifying_question("怎么办", broken)
+    assert asked.asked_by == "template"
+    assert asked.question == clarify.TEMPLATE.question
+
+
+def test_generation_unavailable_also_falls_back_to_the_template():
+    """⚠️ V1.36 起 `generate()` 把传输失败统一包装成 `GenerationUnavailable`（探测得到 ≠ 用得了）。
+
+    它**不是** `OSError` / `URLError` 的子类，所以那条 except 必须显式认它——少了这一句，
+    模型一挂澄清就从「如实退回模板」变成一次 500。
+    """
+
+    def broken(_messages, schema=None):
+        raise GenerationUnavailable("本地生成模型调用失败：llama-server binary not found")
 
     asked = clarify.clarifying_question("怎么办", broken)
     assert asked.asked_by == "template"

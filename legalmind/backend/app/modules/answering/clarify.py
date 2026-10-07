@@ -31,6 +31,7 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, Field, ValidationError
 
+from app.adapters.generation import GenerationUnavailable
 from app.modules.retrieval.rewrite import rewrite
 
 #: 剥离疑问框架后剩下的「实质内容」至少要有这么多字，否则认为问题太笼统。
@@ -169,7 +170,15 @@ def clarifying_question(question: str, generate) -> Clarification:
         raw = generate(build_clarify_messages(question), schema=CLARIFY_SCHEMA)
     # 模型不可用（§9.5 不回落外部服务）、或输出解析不出来——**如实降级成模板问法**。
     # 澄清不是结论，用模板问是合理降级，不算「编内容」。
-    except (urllib.error.URLError, OSError, TimeoutError, json.JSONDecodeError):
+    # `GenerationUnavailable` 是 V1.36 起 `generate()` 对传输失败的统一包装（探测得到≠用得了），
+    # 少了它这条 except 就接不住，澄清会从「退回模板」变成一次 500。
+    except (
+        GenerationUnavailable,
+        urllib.error.URLError,
+        OSError,
+        TimeoutError,
+        json.JSONDecodeError,
+    ):
         return TEMPLATE
     parsed = parse_clarification(raw)
     return parsed if parsed is not None else TEMPLATE

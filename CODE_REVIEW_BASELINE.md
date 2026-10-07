@@ -53,7 +53,7 @@ await to_thread.run_sync(storage.put, key, content, sha256)
 
 **位置**：`app/modules/documents/service.py:167-194`（`read_content`）
 **问题**：`storage.open()` 与 SHA-256 校验都在 `async with session.begin()` 内完成。
-**依据**：设计 12.1——"外部模型调用、文件处理和队列发送不放进长数据库事务"；CLAUDE.md 同款表述。此处属于**触碰红线 R2**。
+**依据**：设计 12.1——"外部模型调用、文件处理和队列发送不放进长数据库事务"；CONTRIBUTING.md 同款表述。此处属于**触碰红线 R2**。
 **建议**：拆为「短事务授权 → 事务外读取并校验 → 短事务写审计」。下载审计失败仍不交付文件（保留现有语义）。
 
 ### M2 恢复流程可能产生"部分恢复"

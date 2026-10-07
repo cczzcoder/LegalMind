@@ -31,7 +31,7 @@
 | --- | --- | --- | --- | --- | --- |
 | m2 | `identity/service.py:270-292` | `list_users` 对每个用户各查一次角色（N+1）；用户数上百后列表接口变慢 | 一次 join 查询后在内存分组（`_to_user_out` 抽出纯构造，单用户路径不变） | ~10 行 | 已修 8e81047 |
 | n1 | `models.py`（多数实体） | `organization_id` 多为"仅索引、无外键"（只有 `User.organization_id` 有外键），风格不一致，跨表一致性靠应用保证 | **已定策略：业务表统一建外键**——`organization_id` 与"人"引用列（created_by/author_id/granted_by/actor_id）一律 `ondelete=RESTRICT`；删除策略见设计 15.3，交由显式删除流程。多态 `resource_id` 无法建外键 | 迁移 0006 | 已修 46937cf |
-| n2 | 全仓库（后端） | `ruff format` 显示 12 个文件待格式化；CLAUDE.md 只要求 `ruff check` | 引入 `ruff format` 作为格式基线，**单独一次提交**（刷新 12 个文件，勿与其他改动混合） | 1 次提交 | 已修 16c498a |
+| n2 | 全仓库（后端） | `ruff format` 显示 12 个文件待格式化；CONTRIBUTING.md 只要求 `ruff check` | 引入 `ruff format` 作为格式基线，**单独一次提交**（刷新 12 个文件，勿与其他改动混合） | 1 次提交 | 已修 16c498a |
 | n3 | `frontend/` | 前端无 eslint / prettier / 测试，静态检查空白 | 引入 eslint + prettier（+ 视需要加 vitest） | 需一次决策 | 已修 702b936（未加 vitest） |
 | m7 | `frontend/src/App.tsx:16-46` | 前端类型手写，未从 OpenAPI 生成，接口变更易失同步 | 引入类型生成（如 openapi-typescript） | 需引入工具链 | 待办，建议接口稳定后再做 |
 

@@ -120,7 +120,7 @@ API 文档：
     docker compose run --rm --no-deps api pytest
 
 容器内未设置 TEST_DATABASE_URL，只运行冒烟测试，集成测试会跳过。
-集成测试的本机运行方式见仓库根目录 CLAUDE.md。
+集成测试的本机运行方式见仓库根目录 CONTRIBUTING.md。
 测试通过不代表完整业务和安全测试已经通过。
 CI（`.github/workflows/ci.yml`）在 push 与 PR 上跑同一套门禁。
 

@@ -673,7 +673,7 @@ def _exit_missing_pg_tool(tool: str):
     sys.exit(
         f"未找到 {tool}：备份与恢复依赖 PostgreSQL 客户端工具。\n"
         f"  请安装与数据库服务器同版本的客户端工具（pg_dump / pg_restore）并加入 PATH；\n"
-        f"  若数据库运行在 Docker 中，可改用容器内的 pg_dump/pg_restore，见 CLAUDE.md「本机开发」。"
+        f"  若数据库运行在 Docker 中，可改用容器内的 pg_dump/pg_restore，见 CONTRIBUTING.md「本机开发」。"
     )
 
 

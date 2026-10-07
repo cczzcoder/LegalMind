@@ -1,8 +1,8 @@
 # 本机运行产生的日志（legalmind/ 内的忽略规则见 legalmind/.gitignore）
 *.log
 
-# 原始法律资料不提交仓库（CLAUDE.md 敏感信息规则）
+# 原始法律资料不提交仓库（见 CONTRIBUTING.md 敏感信息规则）
 法律文献/
 
-# WorkBuddy 工作区辅助数据（本机记忆，不提交仓库）
+# 本机工作区辅助数据（不提交仓库）
 .workbuddy-ai/

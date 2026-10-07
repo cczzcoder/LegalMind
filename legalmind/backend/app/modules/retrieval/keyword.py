@@ -17,6 +17,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
+import sqlalchemy as sa
 from sqlalchemy import ColumnElement, func, literal
 
 from app.models import ProvisionVersion
@@ -48,6 +49,10 @@ def _terms(query: str) -> list[str]:
 
 
 def _like_all(terms: list[str]) -> ColumnElement[bool]:
+    # **空检索词不匹配任何东西**，而不是抛 IndexError——纵深防御：`rewrite.variants()` 已经滤掉
+    # 空白变体，但调用方仍可能直接传空串进来（例如 `POST /search` 的 `semantic`）。
+    if not terms:
+        return sa.false()
     condition = _flat_column().like(f"%{terms[0]}%")
     for term in terms[1:]:
         condition = condition & _flat_column().like(f"%{term}%")

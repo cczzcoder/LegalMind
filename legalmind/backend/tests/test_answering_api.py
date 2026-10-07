@@ -77,6 +77,15 @@ async def _finish(session_factory, run_id: str, **fields) -> None:
             setattr(run, key, value)
 
 
+async def _drain(session_factory, run_id: str) -> None:
+    """把该运行已有的任务标成成功——模拟 worker 已经消费掉初次任务。"""
+    async with session_factory() as session, session.begin():
+        for job in await session.scalars(
+            select(Job).where(Job.payload["run_id"].astext == str(run_id))
+        ):
+            job.status = "succeeded"
+
+
 async def _read_events(client, run_id: str) -> list[tuple[str, dict]]:
     events: list[tuple[str, dict]] = []
     async with client.stream("GET", f"/api/v1/answers/{run_id}/events") as response:
@@ -311,3 +320,66 @@ async def test_job_payload_never_holds_the_question(cache, make_client, make_use
         job = await session.scalar(select(Job).where(Job.payload["run_id"].astext == created["id"]))
     assert job is not None
     assert secret not in json.dumps(job.payload, ensure_ascii=False)
+
+
+async def test_vague_question_is_asked_back_instead_of_answered(
+    cache, monkeypatch, make_client, make_user, session_factory
+):
+    """笼统问题 → `CLARIFYING`；`answer` 字段里是**反问**，`clarifying=true`。"""
+    monkeypatch.setattr(answering_router, "_session_factory", lambda: session_factory)
+    async with make_client() as client:
+        await _sign_in(client, make_user)
+        created = await _submit(client, "工资怎么办？")
+        run_id = created["id"]
+        await _finish(session_factory, run_id, state="CLARIFYING", blocked_by="clarifying")
+        await cache.put(f"legalmind:answer:{run_id}", "你说的工资问题是指哪方面？")
+        detail = (await client.get(f"/api/v1/answers/{run_id}")).json()
+        events = await _read_events(client, run_id)
+
+    assert detail["clarifying"] is True
+    assert detail["published"] is False
+    assert detail["blocked_by"] == "clarifying"
+    # **流推 `clarify` 就收尾**——不能占着连接等用户（可能等很久）
+    assert [name for name, _ in events] == ["state", "clarify", "done"]
+    clarify_event = dict(events)["clarify"]
+    assert clarify_event["question"] == "你说的工资问题是指哪方面？"
+    assert clarify_event["resume"].endswith(f"/{run_id}/clarify")
+
+
+async def test_clarify_endpoint_continues_the_run(cache, make_client, make_user, session_factory):
+    async with make_client() as client:
+        await _sign_in(client, make_user)
+        created = await _submit(client, "工资怎么办？")
+        # 运行要真的停在 CLARIFYING（真实流程里由 worker 跑出来），否则接口会正确拒绝
+        await _finish(session_factory, created["id"], state="CLARIFYING")
+        await _drain(session_factory, created["id"])
+        response = await client.post(
+            f"/api/v1/answers/{created['id']}/clarify",
+            json={"supplement": "用人单位拖欠工资该怎么办"},
+        )
+    assert response.status_code == 202
+    merged = await cache.get(answer_runs.question_key(created["id"]))
+    assert "工资怎么办？" in merged and "用人单位拖欠工资" in merged
+
+
+async def test_clarify_endpoint_rejects_a_run_that_is_not_waiting(cache, make_client, make_user):
+    async with make_client() as client:
+        await _sign_in(client, make_user)
+        created = await _submit(client)
+        response = await client.post(
+            f"/api/v1/answers/{created['id']}/clarify", json={"supplement": "补充"}
+        )
+    assert response.status_code == 409
+    # 错误响应体是 `{code, message, trace_id}`，不是 FastAPI 的 `detail`
+    assert response.json()["code"] == "conflict"
+
+
+async def test_clarify_endpoint_is_scoped_to_the_organization(cache, make_client, make_user):
+    async with make_client() as owner_client, make_client() as other_client:
+        await _sign_in(owner_client, make_user)
+        await _sign_in(other_client, make_user)
+        created = await _submit(owner_client)
+        response = await other_client.post(
+            f"/api/v1/answers/{created['id']}/clarify", json={"supplement": "补充"}
+        )
+    assert response.status_code == 404

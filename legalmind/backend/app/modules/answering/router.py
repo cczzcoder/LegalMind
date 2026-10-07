@@ -34,7 +34,12 @@ from app.core.database import SessionFactory, get_session
 from app.core.security import Principal
 from app.models import ANSWER_RUN_TERMINAL_STATES, AnswerRun
 from app.modules.answering import runs as answer_runs
-from app.modules.answering.schemas import AnswerRunOut, ReviewRequest, SubmitQuestion
+from app.modules.answering.schemas import (
+    AnswerRunOut,
+    ClarifyRequest,
+    ReviewRequest,
+    SubmitQuestion,
+)
 from app.modules.authorization.service import DOCUMENT_READ, REVIEW_DECIDE, require_permission
 
 router = APIRouter(tags=["answering"])
@@ -42,6 +47,10 @@ router = APIRouter(tags=["answering"])
 #: 终态到了、但结果还没落库/进缓存时，最多再等这么多次轮询（默认 0.5s × 10 = 5s）。
 #: 这只是给「终态先写、结果后写」这个固有顺序留的宽限，不是重试机制。
 CONTENT_GRACE_POLLS = 10
+
+#: **挂起状态**：运行没结束（还要等用户补充后继续），但流不能一直挂着等——推完就收尾。
+#: §9.1 的 `CLARIFYING → RETRIEVING` 决定了它不是终态，所以这里单独列一份。
+SUSPENDED_STATES = ("CLARIFYING",)
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 ReaderDep = Annotated[Principal, Depends(require_permission(DOCUMENT_READ))]
@@ -75,6 +84,7 @@ async def _to_out(run: AnswerRun, cache) -> AnswerRunOut:
         previous_state=run.previous_state,
         published=run.published,
         blocked_by=run.blocked_by,
+        clarifying=run.state in SUSPENDED_STATES,
         review_required=run.review_required,
         reviewed_at=run.reviewed_at,
         review_note=run.review_note,
@@ -183,6 +193,32 @@ async def _event_stream(run_id: UUID, principal: Principal):
                     },
                 )
 
+            if run.state in SUSPENDED_STATES:
+                # 两种情况都长得像「在等用户」，但**只有一种真的在等**：
+                #   ① 刚提交补充、任务还在飞 → 运行马上就会有进展，**流要继续跟**；
+                #   ② 确实没人接手 → 这才是「在等用户」，推 clarify 就收尾（不占着连接等下去）。
+                # 判据用任务表（`has_in_flight_job`）——**任务表才是「在飞」的事实来源**。
+                async with _session_factory()() as session:
+                    in_flight = await answer_runs.has_in_flight_job(session, run.id)
+                clarification = await answer_runs.read_answer(cache, run.id)
+                if in_flight or (clarification is None and grace_polls < CONTENT_GRACE_POLLS):
+                    # 结果还没落（终态先写、内容后写的固有顺序，见下）也再等等
+                    if clarification is None:
+                        grace_polls += 1
+                    if monotonic() < deadline:
+                        await asyncio.sleep(settings.answer_stream_poll_seconds)
+                        continue
+                yield _sse(
+                    "clarify",
+                    {
+                        "state": run.state,
+                        "question": clarification,
+                        "resume": f"/api/v1/answers/{run.id}/clarify",
+                    },
+                )
+                yield _sse("done", {})
+                return
+
             if run.state in ANSWER_RUN_TERMINAL_STATES:
                 # **正式答案通过门禁后发送**（§9.4）：终态才推 answer。
                 # 门禁没过的那几种，这里推的是**拒答说明**，`published=false`。
@@ -250,6 +286,36 @@ async def stream_run(run_id: UUID, principal: ReaderDep):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )
+
+
+@router.post("/answers/{run_id}/clarify", response_model=AnswerRunOut, status_code=202)
+async def clarify_run(
+    run_id: UUID, data: ClarifyRequest, session: SessionDep, principal: ReaderDep
+):
+    """回答澄清问题、**继续同一个运行**（设计 §9.1 的 `CLARIFYING → RETRIEVING`）；需 `document.read`。
+
+    补充会与原问题合并（都先脱敏）后重新投递任务；运行记录里仍然只有哈希。
+    不在待澄清状态 → 409；上一次补充还在处理中 → 409。
+    """
+    cache = answer_cache.from_settings(get_settings())
+    try:
+        if not cache.available:
+            raise HTTPException(
+                status_code=503,
+                detail="Short-term cache is not configured (CACHE_URL); cannot continue",
+            )
+        async with session.begin():
+            try:
+                run, _job = await answer_runs.submit_clarification(
+                    session, principal, run_id, data.supplement, cache=cache
+                )
+            except LookupError as error:
+                raise HTTPException(status_code=404, detail=str(error)) from error
+            except ValueError as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
+        return await _to_out(run, cache)
+    finally:
+        await cache.close()
 
 
 @router.post("/answers/{run_id}/review", response_model=AnswerRunOut)

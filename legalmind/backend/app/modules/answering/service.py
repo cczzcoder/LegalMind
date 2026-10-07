@@ -26,7 +26,7 @@
 **只用本地模型**：§9.5 的决策锁定本地部署、默认关闭外部 API，所以这里没有外部回落路径。
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from hashlib import sha256
 from time import perf_counter
@@ -35,9 +35,10 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters import generation
+from app.adapters.cache import cache_key
 from app.core.config import get_settings
 from app.core.security import Principal
-from app.modules.answering import claims
+from app.modules.answering import claims, clarify, runs
 from app.modules.answering.assembly import assemble_evidence
 from app.modules.answering.evidence import (
     INSTRUCTIONS,
@@ -52,6 +53,7 @@ from app.modules.answering.scope import DISCLAIMER, scope_notice
 # ⚠️ 这里**按名字导入**，不要写成 `from ... import verification`——`Answer` 有个同名字段
 # `verification`，而注解在类体里是先赋值后求值，模块名会被字段值（None）盖掉。
 from app.modules.answering.verification import VerificationResult, verify_claims
+from app.modules.redaction.service import redact
 from app.modules.retrieval.schemas import SearchQuery
 from app.modules.retrieval.service import search_provisions
 
@@ -128,6 +130,11 @@ class Answer:
     evidence_notice: str | None = None
     #: 提问范围的边界说明（§20.2、§9.3 第三层）：问题问的是本人情形时**不给个人结论**。
     scope_notice: str | None = None
+    #: 澄清请求（§9.1 `CLARIFYING`）：问题太笼统时**反问**，等用户补充后继续同一个运行。
+    clarifying_question: str | None = None
+    #: 这次运行在 `answer_runs` 里的 id（`record=False` 或还没落库时为 None）。
+    #: 调用方要靠它才能续跑澄清（`clarify-run --run <id>`）。
+    run_id: UUID | None = None
     #: §20.2 要求每个正式输出都带的「不构成法律意见」声明。**恒有**，不是可选项。
     disclaimer: str = DISCLAIMER
     #: §20.2 要求标注的生成时间（ISO 8601，UTC）。
@@ -139,7 +146,8 @@ class Answer:
     verification: VerificationResult | None = None
     #: 核验未通过时，模型生成的原始草稿（供人工判读）。
     draft: str | None = None
-    #: 哪道门禁拦下了正式结论：``"scope"`` / ``"verification"`` / ``"format"``；None 表示没被拦。
+    #: 哪道门禁/环节拦下了正式结论：``"scope"`` / ``"verification"`` / ``"format"`` /
+    #: ``"clarifying"``（在等用户补充，§9.1）；None 表示没被拦。
     blocked_by: str | None = None
     #: 本次结论**实际引用**的证据编号（服务端从结构化主张里取，§9.2）。拒答或未生成时为空。
     cited_evidence_ids: tuple[str, ...] = ()
@@ -195,6 +203,7 @@ async def answer_question(
     record: bool = True,
     on_state=None,
     run_row=None,
+    cache=None,
 ) -> Answer:
     """检索 → 生成 → 核验 → 带引用返回，**并把这次运行记下来**（§9.1、§9.4）。
 
@@ -212,8 +221,29 @@ async def answer_question(
         on_state=on_state,
     )
     if record:
-        await _record(session, principal, question, answer, run, limit, max_new_tokens, run_row)
+        recorded = await _record(
+            session, principal, question, answer, run, limit, max_new_tokens, run_row
+        )
+        if recorded is not None:
+            # `Answer` 是冻结的，落库后才知道 run id——用 replace 补上，别为了这个把落库提前
+            answer = replace(answer, run_id=recorded)
+            await _cache_clarification(cache, recorded, question, answer)
     return answer
+
+
+async def _cache_clarification(cache, run_id, question: str, answer: Answer) -> None:
+    """澄清要**能续跑**：把脱敏后的原问题与澄清请求放进短期缓存。
+
+    异步路径本来就会把问题写进缓存（worker 要读）；**同步路径不会**，于是「同步 ask 问了澄清、
+    却没法接着答」——实测踩到（`test_continuation_merges_the_supplement_and_finishes` 暴露）。
+    所以这里补上，键与异步路径**完全一致**（`runs.question_key` / `cache.cache_key`）。
+
+    **只有澄清才写**：正式结论不进缓存（§21「客户数据不落库」），异步路径写缓存是为了复核。
+    """
+    if cache is None or not cache.available or not answer.clarifying_question:
+        return
+    await cache.put(runs.question_key(run_id), redact(question)[0])
+    await cache.put(cache_key(run_id), redact(answer.answer)[0])
 
 
 async def _record(
@@ -225,8 +255,8 @@ async def _record(
     limit: int,
     max_new_tokens: int,
     run_row=None,
-) -> None:
-    """落库这次运行。**只记元数据、证据引用与配置快照**，问题与回答正文只留 sha256（§21）。"""
+) -> UUID | None:
+    """落库这次运行，返回运行记录 id（拿不到就 None）。**只记元数据、证据引用与配置快照**，问题与回答正文只留 sha256（§21）。"""
     settings = get_settings()
     config = {
         "model": answer.model or settings.generation_model,
@@ -238,19 +268,22 @@ async def _record(
         # 提示词没有版本号，用哈希代替——复核时要能判断「是不是换了提示词之后才变成这样」
         "instructions_sha256": sha256(INSTRUCTIONS.encode("utf-8")).hexdigest(),
     }
-    # 调用方可能已经开了事务（测试与未来的 API 层），两种都支持
+    # 调用方可能已经开了事务（测试与未来的 API 层），两种都支持。
+    # ⚠️ **两个分支都要把 `run=run_row` 传下去**：异步路径在 `submit_question` 时已经建好了行，
+    # 漏传就会**再建一行**（同一次运行留两条记录，V1.26 踩过）。
     if session.in_transaction():
-        await record_run(
+        recorded = await record_run(
             session,
             principal=principal,
             question=question,
             answer=answer,
             tracker=run,
             config=config,
+            run=run_row,
         )
     else:
         async with session.begin():
-            await record_run(
+            recorded = await record_run(
                 session,
                 principal=principal,
                 question=question,
@@ -259,6 +292,7 @@ async def _record(
                 config=config,
                 run=run_row,
             )
+    return recorded.id
 
 
 async def _answer_pipeline(
@@ -283,6 +317,35 @@ async def _answer_pipeline(
       门禁后发送」）。
     """
     started = perf_counter()
+
+    # §9.1 的 `CREATED → CLARIFYING / RETRIEVING`：**澄清发生在检索之前**（FR-06 第 2、3 步）。
+    # 判据是确定性的（见 `clarify.needs_clarification`），**不问模型**——实测 7B 判不准。
+    reason = clarify.needs_clarification(question)
+    if reason is not None:
+        model_name = model or get_settings().generation_model
+
+        def ask(messages, schema):
+            return generation.generate(model_name, messages, schema=schema, max_new_tokens=256)
+
+        # ⚠️ **先把问题生成出来，再进 `CLARIFYING`**：状态是给调用方看的，`CLARIFYING` 应当意味着
+        # 「**已经问出去了**」。反过来写的话，生成澄清问题那几十秒里状态已经是 `CLARIFYING`、
+        # 而问题还不存在——实测真实 HTTP 上出现过「状态 CLARIFYING、`clarify` 事件里问题为空」
+        # 的 35 秒窗口（那 35 秒是模型在加载与生成）。
+        asked = clarify.clarifying_question(question, ask)
+        await _advance(run, "CLARIFYING", on_state)
+        return Answer(
+            question=question,
+            answer=asked.render(),
+            citations=(),
+            # 没有走检索，`path` 如实标成 clarify（不是 exact/keyword/vector 里的任何一个）
+            path="clarify",
+            # 模板问法没有用模型——`model=None` 如实反映这一点
+            model=model_name if asked.asked_by == "model" else None,
+            seconds=perf_counter() - started,
+            blocked_by="clarifying",
+            clarifying_question=asked.render(),
+        )
+
     await _advance(run, "RETRIEVING", on_state)
     # 复用 P4 的检索：`semantic` 走级联（先关键词、命中为空才向量），并做授权复核与未生效屏蔽
     search = await search_provisions(

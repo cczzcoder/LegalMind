@@ -182,7 +182,7 @@ async def test_status_notice_is_attached_when_only_some_evidence_is_not_current(
     )
 
     async with session_factory() as session:
-        answer = await service.answer_question(session, principal, "问题")
+        answer = await service.answer_question(session, principal, "工资应当怎么支付？")
 
     assert "模型给的结论" in answer.answer
     # 引用由**服务端**从证据编号渲染（§9.2），不是模型写的
@@ -275,7 +275,7 @@ async def test_partial_assembly_answers_but_limits_the_scope(
     )
 
     async with session_factory() as session:
-        answer = await service.answer_question(session, principal, "问题")
+        answer = await service.answer_question(session, principal, "工资应当怎么支付？")
 
     assert "模型给的结论" in answer.answer
     assert answer.evidence_notice is not None

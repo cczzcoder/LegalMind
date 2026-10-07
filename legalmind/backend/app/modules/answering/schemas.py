@@ -20,6 +20,12 @@ class SubmitQuestion(BaseModel):
     model: str | None = Field(default=None, description="覆盖生成模型（默认取配置里的）")
 
 
+class ClarifyRequest(BaseModel):
+    """回答澄清问题、继续同一个运行（设计 §9.1 的 `CLARIFYING → RETRIEVING`）。"""
+
+    supplement: str = Field(min_length=1, max_length=2000)
+
+
 class ReviewRequest(BaseModel):
     """人工复核的结论（设计 §9.3 第三层）。"""
 
@@ -41,6 +47,8 @@ class AnswerRunOut(BaseModel):
     seconds: float | None
     created_at: datetime
 
+    #: 是不是在等用户补充（§9.1 `CLARIFYING`）——此时 `answer` 里是**澄清问题**，不是结论
+    clarifying: bool = False
     #: 短期缓存里还有没有内容（TTL 到期、未配置缓存、或没产出 → false）
     content_available: bool
     question: str | None = None

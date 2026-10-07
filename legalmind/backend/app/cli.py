@@ -192,6 +192,7 @@ async def ask_command(
         try:
             async with session.begin():
                 principal = await cli_principal(session, username, DOCUMENT_READ)
+            # 传缓存：**澄清要能续跑**（原问题得进短期缓存，与异步路径同一套键）
             answer = await answering_service.answer_question(
                 session,
                 principal,
@@ -199,6 +200,7 @@ async def ask_command(
                 limit=limit,
                 max_new_tokens=max_new_tokens,
                 model=model,
+                cache=answer_cache.from_settings(get_settings()),
             )
         except HTTPException as error:
             sys.exit(f"{error.status_code}: {error.detail}")
@@ -220,6 +222,9 @@ async def ask_command(
         print()
         print("⚠️  核验未通过（设计 §9.3 第一层）")
     print()
+    if answer.clarifying_question:
+        # §9.1 `CLARIFYING`：这不是结论，是**反问**——正文本身就是要问用户的话
+        print("❓ 需要补充信息（设计 §9.1 的澄清分支）：")
     print(answer.answer)
     if answer.draft:
         print()
@@ -228,10 +233,16 @@ async def ask_command(
     # §20.2：每个正式输出都要带「不构成法律意见」声明与知识范围说明
     print()
     print(f"※ {answer.disclaimer}")
-    if not answer.published:
-        reason = {"scope": "问题涉及本人情形", "verification": "引用核验未通过"}.get(
-            answer.blocked_by, answer.blocked_by
-        )
+    if answer.clarifying_question:
+        print("※ 这是**澄清请求**，不是结论；补充后可继续同一个运行：")
+        target = answer.run_id or "<运行 id 见 answer-runs>"
+        print(f"  python -m app.cli clarify-run --as <用户名> --run {target} --answer '<补充>'")
+    elif not answer.published:
+        reason = {
+            "scope": "问题涉及本人情形",
+            "verification": "引用核验未通过",
+            "format": "模型未按约定输出结构化结论",
+        }.get(answer.blocked_by, answer.blocked_by)
         print(f"※ 本结论未通过门禁（{reason}），不作为正式答案，请人工判读。")
     if answer.citations:
         print()
@@ -241,6 +252,37 @@ async def ask_command(
                 f"  [{index}] {citation.instrument_title} {citation.provision_display}"
                 f"（效力状态：{citation.legal_status}，版本 {citation.provision_version_id}）"
             )
+
+
+async def clarify_run_command(username: str, run_id: str, supplement: str) -> None:
+    """回答澄清问题、继续同一个运行（设计 §9.1 的 `CLARIFYING → RETRIEVING`）；需 document.read。
+
+    补充会与原问题合并（都先脱敏）后重新投递任务；**运行记录里仍然只有哈希**（§21）。
+    """
+    settings = get_settings()
+    cache = answer_cache.from_settings(settings)
+    try:
+        async with SessionFactory() as session:
+            try:
+                async with session.begin():
+                    principal = await cli_principal(session, username, DOCUMENT_READ)
+                    run, job = await answering_runs.submit_clarification(
+                        session, principal, UUID(run_id), supplement, cache=cache
+                    )
+            except HTTPException as error:
+                sys.exit(f"{error.status_code}: {error.detail}")
+            except (LookupError, ValueError) as error:
+                sys.exit(str(error))
+            except answering_runs.CacheUnavailable as error:
+                sys.exit(str(error))
+    finally:
+        await cache.close()
+        await engine.dispose()
+
+    print(f"已提交补充：{run.id}（任务 {job.id}，运行状态仍为 {run.state}，由 worker 推进）")
+    print()
+    print("启动 worker：python -m app.cli run-worker --once")
+    print(f"查看结果：  python -m app.cli answer-run --as {username} --run {run.id}")
 
 
 async def answer_runs_command(username: str, limit: int, pending_only: bool) -> None:
@@ -387,7 +429,10 @@ async def answer_run_command(username: str, run_id: str) -> None:
 
     print(f"运行：{run.id}")
     print(f"状态：{run.state}（上一步 {run.previous_state or '—'}）　门禁：{run.blocked_by or '—'}")
-    print(f"发布：{run.published}　待审：{run.review_required and run.reviewed_at is None}")
+    waiting = "　**在等用户补充**（CLARIFYING）" if run.state == "CLARIFYING" else ""
+    print(
+        f"发布：{run.published}　待审：{run.review_required and run.reviewed_at is None}{waiting}"
+    )
     print(
         f"证据：{len(run.evidence)} 条　耗时：{run.seconds if run.seconds is None else f'{run.seconds:.1f}s'}"
     )
@@ -968,6 +1013,13 @@ def main() -> None:
         help="异步执行：提交后立刻返回 run id，由 worker 在后台跑（需 CACHE_URL）",
     )
 
+    clarify_run = commands.add_parser(
+        "clarify-run", help="回答澄清问题、继续同一个运行（设计 §9.1 的澄清分支）"
+    )
+    clarify_run.add_argument("--as", dest="actor", required=True, help="执行操作的用户名")
+    clarify_run.add_argument("--run", required=True, help="运行记录 id")
+    clarify_run.add_argument("--answer", dest="supplement", required=True, help="补充说明")
+
     answer_run = commands.add_parser(
         "answer-run", help="查看一次问答运行（含短期缓存里的问题与回答，脱敏后）"
     )
@@ -1087,6 +1139,10 @@ def main() -> None:
     if args.command == "ask":
         handler = ask_async_command if args.run_async else ask_command
         asyncio.run(handler(args.actor, args.question, args.limit, args.max_new_tokens, args.model))
+        return
+
+    if args.command == "clarify-run":
+        asyncio.run(clarify_run_command(args.actor, args.run, args.supplement))
         return
 
     if args.command == "answer-run":

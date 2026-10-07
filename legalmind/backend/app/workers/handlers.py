@@ -18,7 +18,14 @@ from app.adapters.storage import LocalFileStorage
 from app.core.config import get_settings
 from app.core.database import SessionFactory
 from app.core.security import Principal
-from app.models import AnswerRun, Job, SourceArtifact, User, UserRole
+from app.models import (
+    ANSWER_RUN_TERMINAL_STATES,
+    AnswerRun,
+    Job,
+    SourceArtifact,
+    User,
+    UserRole,
+)
 from app.modules.answering import runs as answer_runs
 from app.modules.answering import service as answering_service
 from app.modules.parsing.service import parse_artifact
@@ -141,7 +148,11 @@ async def handle_answer_question(
         # ⚠️ **重试要先把状态复位到 CREATED**：转移表里没有「回到起点」的边（`FAILED` 是终态、
         # `GENERATING → RETRIEVING` 也不合法），而任务重试（租约过期、可重试失败）本质上是
         # **同一次运行的下一次尝试**。不复位就会在重试时抛 `IllegalTransition`。
-        if run.state != "CREATED":
+        #
+        # ⚠️ **但澄清后的续跑不是重试**：它是第一次尝试（`attempt_count == 1`）、状态停在
+        # `CLARIFYING`，链路要走的正是转移表里声明的 `CLARIFYING → RETRIEVING`——**复位反而会
+        # 把这条边用掉的机会抹掉**。所以只在「重试」或「停在终态」时复位。
+        if job.attempt_count > 1 or run.state in ANSWER_RUN_TERMINAL_STATES:
             run.previous_state = run.state
             run.state = "CREATED"
         principal = await _principal_for_run(session, run)

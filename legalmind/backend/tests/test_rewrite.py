@@ -47,3 +47,21 @@ def test_variants_are_deduplicated():
 def test_terms_splits_on_the_spaces_the_rewrite_introduces():
     assert rewrite.terms("单位 欠缴 社会保险") == ["单位", "欠缴", "社会保险"]
     assert rewrite.terms("没有空格的连续中文") == ["没有空格的连续中文"]
+
+
+def test_variants_never_include_a_blank_query():
+    """**空白变体不是查询，必须滤掉**——它会让关键词段抛 `IndexError`（整条检索 500）。
+
+    实测（2026-10-07）：「怎么办」「怎么处理」这类**纯疑问句**经第 2 层剥离后 `stripped` 是空串，
+    空串进 `_all_terms_flat` 取 `terms[0]` 直接崩——而这是用户最常见的问法之一。
+    """
+    for question in ("怎么办", "怎么处理", "  ", "？"):
+        variants = rewrite.rewrite(question).variants()
+        assert all(item.strip() for item in variants), question
+        assert "" not in variants
+
+
+def test_vague_question_still_keeps_its_original_variant():
+    """滤掉空白变体不等于把原查询也丢了——原查询**永远**在候选里（§8.2 第 2 步「默认保留」）。"""
+    variants = rewrite.rewrite("怎么办").variants()
+    assert "怎么办" in variants

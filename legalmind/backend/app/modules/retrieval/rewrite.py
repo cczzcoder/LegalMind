@@ -97,7 +97,15 @@ class Rewrite:
     expanded: tuple[str, ...]
 
     def variants(self) -> tuple[str, ...]:
-        return tuple(dict.fromkeys([self.original, self.normalized, self.stripped, *self.expanded]))
+        """拿去检索的候选集合（含原查询）。
+
+        ⚠️ **空白变体不算查询，必须滤掉**：纯疑问句（「怎么办」「怎么处理」）经第 2 层剥离后
+        `stripped` 是**空串**，空串进关键词段会让 `_all_terms_flat` 取 `terms[0]` 抛
+        `IndexError`——**整条检索 500**。实测（2026-10-07）「怎么办」「怎么处理」都崩，
+        而这类输入正是用户最常见的问法之一。**一个空的「查询变体」根本不是查询。**
+        """
+        candidates = [self.original, self.normalized, self.stripped, *self.expanded]
+        return tuple(dict.fromkeys(item for item in candidates if item.strip()))
 
 
 def normalize(text: str) -> str:

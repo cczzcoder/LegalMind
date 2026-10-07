@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from hashlib import sha256
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.cache import AnswerCache, cache_key
@@ -287,3 +287,78 @@ async def read_answer(cache: AnswerCache, run_id) -> str | None:
     """取回当时的答案。**取不到就是取不到**——TTL 到期、没配缓存、或本来就失败，一律返回 None，
     由调用方如实显示「内容不可用」，而不是拿别的东西冒充。"""
     return await cache.get(cache_key(run_id))
+
+
+async def has_in_flight_job(session: AsyncSession, run_id) -> bool:
+    """这个运行有没有**在飞**的任务（pending / running / retry_wait）。
+
+    **任务表才是「在飞」的事实来源**：运行状态在提交后到 worker 领取前有一小段窗口，那期间
+    状态还停在原处（`CLARIFYING`）却已经有任务在跑了。两处都要用这个判据：
+    `submit_clarification` 用它挡连点，SSE 用它区分「真在等用户」与「刚续跑、马上就有进展」。
+    """
+    count = await session.scalar(
+        select(func.count())
+        .select_from(Job)
+        .where(
+            Job.payload["run_id"].astext == str(run_id),
+            Job.status.in_(("pending", "running", "retry_wait")),
+        )
+    )
+    return bool(count)
+
+
+async def submit_clarification(
+    session: AsyncSession,
+    principal: Principal,
+    run_id,
+    supplement: str,
+    *,
+    cache: AnswerCache,
+) -> tuple[AnswerRun, Job]:
+    """回答澄清问题、**继续同一个运行**（§9.1 的 `CLARIFYING → RETRIEVING`）。
+
+    「原问题 + 补充」合并后**覆盖缓存里的那一份**——worker 只读 `question_key`，写回去就等于把
+    这次运行的问题补全了。运行记录里仍然只有哈希（§21「客户数据不落库」）。
+
+    ⚠️ **同一运行只允许一份补充在飞**：提交后运行仍停在 `CLARIFYING`（等 worker 去推进），
+    所以「状态检查」挡不住连点两次。真正的防线是查 `jobs` 里有没有 pending/running/retry_wait 的
+    同 run 任务——**任务表才是「在飞」的事实来源**。
+    """
+    if not cache.available:
+        raise CacheUnavailable("未配置短期缓存（CACHE_URL），无法提交补充")
+
+    run = await session.get(AnswerRun, run_id)
+    if run is None or run.organization_id != principal.organization_id:
+        raise LookupError("运行记录不存在")
+    if run.state != "CLARIFYING":
+        raise ValueError(f"运行不在待澄清状态（当前 {run.state}）")
+
+    if await has_in_flight_job(session, run.id):
+        raise ValueError("上一次补充还在处理中")
+
+    original = await read_question(cache, run.id)
+    if original is None:
+        raise LookupError("原问题已随短期缓存过期，无法继续")
+
+    merged, _ = redact(f"{original}\n补充：{supplement}")
+    await cache.put(question_key(run.id), merged)
+
+    sent = await session.scalar(
+        select(func.count()).select_from(Job).where(Job.payload["run_id"].astext == str(run.id))
+    )
+    job = Job(
+        job_type=QUESTION_JOB,
+        payload={
+            "run_id": str(run.id),
+            "limit": run.config.get("limit", 5),
+            "max_new_tokens": run.config.get("max_new_tokens", 512),
+            "model": run.config.get("model"),
+        },
+        idempotency_key=f"{run.id}:{QUESTION_JOB}:{ANSWER_CONFIG_VERSION}:{sent}",
+        status="pending",
+        attempt_count=0,
+        max_attempts=3,
+    )
+    session.add(job)
+    await session.flush()
+    return run, job

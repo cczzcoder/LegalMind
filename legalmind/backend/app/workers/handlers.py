@@ -4,6 +4,7 @@
 处理器失败时抛异常，由 ``classify`` 映射为任务错误码与是否可重试。
 """
 
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from uuid import UUID
@@ -12,10 +13,18 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.adapters import cache as answer_cache
 from app.adapters.storage import LocalFileStorage
+from app.core.config import get_settings
+from app.core.database import SessionFactory
 from app.core.security import Principal
-from app.models import Job, SourceArtifact, User, UserRole
+from app.models import AnswerRun, Job, SourceArtifact, User, UserRole
+from app.modules.answering import runs as answer_runs
+from app.modules.answering import service as answering_service
 from app.modules.parsing.service import parse_artifact
+from app.modules.redaction.service import redact
+
+logger = logging.getLogger(__name__)
 
 PARSE_JOB = "document.parse"
 
@@ -80,8 +89,104 @@ async def handle_document_parse(
     }
 
 
+def build_answer_cache():
+    """构造短期内容缓存。**抽成函数是为了让测试能替换掉它**（真 Redis 不该进单元测试）。"""
+    return answer_cache.from_settings(get_settings())
+
+
+async def _principal_for_run(session: AsyncSession, run: AnswerRun) -> Principal:
+    """按运行记录里的请求者重建 Principal（`answer_runs.requested_by`）。
+
+    解析任务当初只能取原件的 `created_by`（`jobs` 不记创建者，见 `_principal_for_document` 的
+    注释），**运行记录把请求者记下来了**——所以这里不需要绕道。
+
+    ⚠️ **不开自己的事务**：调用方已经在事务里，再 `begin()` 会抛
+    `InvalidRequestError: A transaction is already begun`（实测踩过）。
+    """
+    user = await session.scalar(select(User).where(User.id == run.requested_by))
+    if user is None or not user.is_active:
+        raise HTTPException(status_code=404, detail="Requester not found")
+    roles = frozenset(
+        await session.scalars(select(UserRole.role).where(UserRole.user_id == user.id))
+    )
+    return Principal(organization_id=user.organization_id, user_id=user.id, roles=roles)
+
+
+async def _update_run_state(run_id: UUID, state: str) -> None:
+    """把进度写进运行记录——**用独立会话**，免得和链路的检索事务缠在一起。
+
+    单独开会话意味着**每次转移都提交一次**，所以调用方轮询 run 就能看到进度（§9.4 的
+    「核验前发送进度状态」）。**这是有意为之的写放大**：一次问答只有十来个状态。
+    """
+    async with SessionFactory() as session, session.begin():
+        run = await session.get(AnswerRun, run_id)
+        if run is not None:
+            run.previous_state = run.state
+            run.state = state
+
+
+async def handle_answer_question(
+    session: AsyncSession, storage: LocalFileStorage, job: Job
+) -> dict | None:
+    """跑一次异步问答（设计 §9.4）。
+
+    结果**不进数据库**（§21「客户数据不落库」）：运行记录只更新状态、证据引用与配置快照，
+    答案本身**跑过脱敏后写进短期缓存**（TTL 到期即焚），复核人从那里取。
+    """
+    run_id = UUID(job.payload["run_id"])
+    async with session.begin():
+        run = await session.get(AnswerRun, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Answer run not found")
+        # ⚠️ **重试要先把状态复位到 CREATED**：转移表里没有「回到起点」的边（`FAILED` 是终态、
+        # `GENERATING → RETRIEVING` 也不合法），而任务重试（租约过期、可重试失败）本质上是
+        # **同一次运行的下一次尝试**。不复位就会在重试时抛 `IllegalTransition`。
+        if run.state != "CREATED":
+            run.previous_state = run.state
+            run.state = "CREATED"
+        principal = await _principal_for_run(session, run)
+
+    cache = build_answer_cache()
+    question = await answer_runs.read_question(cache, run_id)
+    if question is None:
+        # 问题随缓存过期了（TTL 短于任务排队时间）——重试也没用，如实失败
+        async with session.begin():
+            target = await session.get(AnswerRun, run_id)
+            if target is not None:
+                target.previous_state, target.state = target.state, "FAILED"
+        raise HTTPException(status_code=404, detail="Question expired from the short-term cache")
+
+    async def on_state(state: str) -> None:
+        await _update_run_state(run_id, state)
+
+    # ⚠️ **这里刻意不包 try/except**：失败时**不动运行记录**——任务会重试，重试前会把状态复位；
+    # 而「永久失败」由 job 表记录（运行记录停在最后一次尝试的状态，`answer-run` 会把任务状态
+    # 一并显示出来）。在这里补一个 FAILED 反而会让重试撞上终态（转移表里 FAILED 没有出边）。
+    answer = await answering_service.answer_question(
+        session,
+        principal,
+        question,
+        limit=job.payload.get("limit", 5),
+        max_new_tokens=job.payload.get("max_new_tokens", 512),
+        model=job.payload.get("model"),
+        record=True,
+        on_state=on_state,
+        # **更新 submit 时建好的那一行**，不要再建一行（实测踩过：一次运行留两条记录）
+        run_row=run,
+    )
+
+    # ⚠️ **先脱敏再缓存**：缓存里不得出现未脱敏的客户内容（设计 §21.3）
+    redacted_answer, entities = redact(answer.answer)
+    stored = await answer_runs.store_answer(cache, run_id, redacted_answer)
+    if entities:
+        logger.info("answer run %s: redacted %d entities before caching", run_id, len(entities))
+    await cache.close()
+    return {"run_id": str(run_id), "state": "recorded", "cached": stored}
+
+
 Handler = Callable[[AsyncSession, LocalFileStorage, Job], Awaitable[dict | None]]
 
 HANDLERS: dict[str, Handler] = {
     PARSE_JOB: handle_document_parse,
+    answer_runs.QUESTION_JOB: handle_answer_question,
 }

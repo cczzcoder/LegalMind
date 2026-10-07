@@ -173,6 +173,17 @@ def status_notice_for(citations: tuple[Citation, ...]) -> str | None:
     return NON_CURRENT_NOTICE.format(detail=detail)
 
 
+async def _advance(run: RunTracker, target: str, on_state) -> None:
+    """转移状态，并把新状态报给观察者。
+
+    异步运行靠它把进度写进运行记录——**§9.4「SSE 只在核验前发送进度状态」**要有东西可发，
+    就得在转移发生的那一刻记下来，而不是等整条链路跑完。
+    """
+    run.to(target)
+    if on_state is not None:
+        await on_state(target)
+
+
 async def answer_question(
     session: AsyncSession,
     principal: Principal,
@@ -182,6 +193,8 @@ async def answer_question(
     max_new_tokens: int = 512,
     model: str | None = None,
     record: bool = True,
+    on_state=None,
+    run_row=None,
 ) -> Answer:
     """检索 → 生成 → 核验 → 带引用返回，**并把这次运行记下来**（§9.1、§9.4）。
 
@@ -189,10 +202,17 @@ async def answer_question(
     """
     run = RunTracker()
     answer = await _answer_pipeline(
-        session, principal, question, run, limit=limit, max_new_tokens=max_new_tokens, model=model
+        session,
+        principal,
+        question,
+        run,
+        limit=limit,
+        max_new_tokens=max_new_tokens,
+        model=model,
+        on_state=on_state,
     )
     if record:
-        await _record(session, principal, question, answer, run, limit, max_new_tokens)
+        await _record(session, principal, question, answer, run, limit, max_new_tokens, run_row)
     return answer
 
 
@@ -204,6 +224,7 @@ async def _record(
     run: RunTracker,
     limit: int,
     max_new_tokens: int,
+    run_row=None,
 ) -> None:
     """落库这次运行。**只记元数据、证据引用与配置快照**，问题与回答正文只留 sha256（§21）。"""
     settings = get_settings()
@@ -236,6 +257,7 @@ async def _record(
                 answer=answer,
                 tracker=run,
                 config=config,
+                run=run_row,
             )
 
 
@@ -248,6 +270,7 @@ async def _answer_pipeline(
     limit: int,
     max_new_tokens: int,
     model: str | None,
+    on_state=None,
 ) -> Answer:
     """真正的链路。**每个出口都声明自己停在哪个状态**（§9.1）——状态不是日志，是转移表的一部分。
 
@@ -260,14 +283,14 @@ async def _answer_pipeline(
       门禁后发送」）。
     """
     started = perf_counter()
-    run.to("RETRIEVING")
+    await _advance(run, "RETRIEVING", on_state)
     # 复用 P4 的检索：`semantic` 走级联（先关键词、命中为空才向量），并做授权复核与未生效屏蔽
     search = await search_provisions(
         session, principal, SearchQuery(semantic=question, limit=limit)
     )
     hits = list(search.hits)
     if not hits:
-        run.to("INSUFFICIENT_EVIDENCE")
+        await _advance(run, "INSUFFICIENT_EVIDENCE", on_state)
         return Answer(
             question=question,
             answer=NO_EVIDENCE,
@@ -292,7 +315,7 @@ async def _answer_pipeline(
     if notice is not None and len(non_current_citations(citations)) == len(citations):
         # 全部依据都不是现行有效：**生成结论没有意义**——拿一部尚未生效或已被取代的法律去
         # 下结论，正是 §8.3 要防的那件事。不调用模型，只把提示与条文交回人工（§9.5）。
-        run.to("NEEDS_REVIEW")
+        await _advance(run, "NEEDS_REVIEW", on_state)
         return Answer(
             question=question,
             answer=notice,
@@ -310,7 +333,7 @@ async def _answer_pipeline(
         # 问题问的是本人情形，就**不生成个人结论**，只把条文与下一步交回提问者。
         # 实测模型会在这种问题上加一句「因此，作为特困人员，可以领取社会救助」——引用没错、
         # 内容也没错，但那一步「你能领」正是越界的地方，而且它还跳过了「须经认定程序」这个前提。
-        run.to("NEEDS_REVIEW")
+        await _advance(run, "NEEDS_REVIEW", on_state)
         return Answer(
             question=question,
             answer=personal,
@@ -325,7 +348,7 @@ async def _answer_pipeline(
 
     if not generation.available(model_name):
         # **不回落外部服务**：本地模型不可用就如实降级成「只给证据 + 转人工」（§9.5）
-        run.to("FAILED")
+        await _advance(run, "FAILED", on_state)
         return Answer(
             question=question,
             answer=MODEL_UNAVAILABLE,
@@ -338,7 +361,7 @@ async def _answer_pipeline(
 
     # 上下文预算（§8.2 第 9 步、§9.4）：检索只限条数不限长度，装不下时推理引擎会**静默从前面
     # 截断**——而指令就在提示最前面，那等于模型先失去全部约束。所以这里自己算、自己如实报告。
-    run.to("ASSEMBLING_EVIDENCE")
+    await _advance(run, "ASSEMBLING_EVIDENCE", on_state)
     assembly = assemble_evidence(
         hits,
         question,
@@ -348,7 +371,7 @@ async def _answer_pipeline(
     )
     if not assembly.included:
         # 一条都装不下：不生成结论，只把条文与提示交回人工（§9.4「限制回答范围或转人工」）
-        run.to("NEEDS_REVIEW")
+        await _advance(run, "NEEDS_REVIEW", on_state)
         return Answer(
             question=question,
             answer=assembly.notice,
@@ -360,7 +383,7 @@ async def _answer_pipeline(
             evidence_notice=assembly.notice,
         )
 
-    run.to("GENERATING")
+    await _advance(run, "GENERATING", on_state)
     text = generation.generate(
         model_name,
         build_messages(assembly.included, question),
@@ -372,7 +395,7 @@ async def _answer_pipeline(
     parsed = claims.parse(text)
     if not parsed.ok:
         # 模型没按约定输出结构化结果：**不当正式答案发布**，原始输出留给人工
-        run.to("NEEDS_REVIEW")
+        await _advance(run, "NEEDS_REVIEW", on_state)
         return Answer(
             question=question,
             answer=STRUCTURE_FAILED_NOTICE.format(reason=parsed.error),
@@ -387,11 +410,11 @@ async def _answer_pipeline(
         )
 
     # 核验对着**模型实际看到的那几条**——它没见过的条文不可能被它正确引用
-    run.to("VERIFYING")
+    await _advance(run, "VERIFYING", on_state)
     result = verify_claims(parsed.answer, question, assembly.included)
     if not result.ok:
         # §9.3 第一层没过：不当正式答案发布，但草稿留着给人工（§9.4「正式答案通过门禁后发送」）
-        run.to("NEEDS_REVIEW")
+        await _advance(run, "NEEDS_REVIEW", on_state)
         return Answer(
             question=question,
             answer=VERIFICATION_FAILED_NOTICE.format(issues=result.summary()),
@@ -407,7 +430,7 @@ async def _answer_pipeline(
         )
 
     # `PARTIAL` = 发布了但**限定了回答范围**（§9.4「证据无法完整装配时，限制回答范围或转人工」）
-    run.to("PARTIAL" if assembly.notice else "ANSWERED")
+    await _advance(run, "PARTIAL" if assembly.notice else "ANSWERED", on_state)
     return Answer(
         question=question,
         answer=claims.render(parsed.answer, evidence_display(assembly.included)),

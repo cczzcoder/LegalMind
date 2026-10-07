@@ -25,6 +25,9 @@ dependencies = [
     "lxml>=5,<7",
     # 向量通路（设计 8.2、8.3）：pgvector 的 SQLAlchemy 类型绑定，纯 Python、很小
     "pgvector>=0.3,<1",
+    # 短期内容缓存（设计 §9.3 第三层、§14.1）：**只作 TTL 键值存储，不作队列**——
+    # 队列用自研 worker（原子领取 + 租约），不引入 Celery。留空 CACHE_URL 即禁用。
+    "redis>=5,<6",
 ]
 
 [project.optional-dependencies]

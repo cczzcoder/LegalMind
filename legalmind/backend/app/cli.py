@@ -36,6 +36,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 from sqlalchemy import select
 
+from app.adapters import cache as answer_cache
 from app.adapters.storage import get_storage
 from app.core.config import get_settings
 from app.core.database import SessionFactory, engine
@@ -46,6 +47,7 @@ from app.models import (
     SOURCE_TYPES,
     TRUST_LEVELS,
     AnswerRun,
+    Job,
     Organization,
     User,
     UserRole,
@@ -310,6 +312,107 @@ async def review_run_command(username: str, run_id: str, note: str | None) -> No
     print(f"复核人：{run.reviewed_by}　时间：{run.reviewed_at}")
     if run.review_note:
         print(f"备注：{run.review_note}")
+
+
+async def ask_async_command(
+    username: str, question: str, limit: int, max_new_tokens: int, model: str | None
+) -> None:
+    """异步问答（设计 §9.4）：**提交后立刻返回**，由 worker 在后台执行。
+
+    与同步 `ask` 的两点不同：① 需要短期缓存（答案要经它交付，问题也要经它传给 worker）；
+    ② **问题先脱敏再进缓存**——它必须离开进程，所以不能带原始 PII。运行记录里仍然只有元数据与
+    哈希（§21「客户数据不落库」）。
+    """
+    settings = get_settings()
+    cache = answer_cache.from_settings(settings)
+    try:
+        async with SessionFactory() as session:
+            try:
+                async with session.begin():
+                    principal = await cli_principal(session, username, DOCUMENT_READ)
+                    run, job = await answering_runs.submit_question(
+                        session,
+                        principal,
+                        question,
+                        cache=cache,
+                        limit=limit,
+                        max_new_tokens=max_new_tokens,
+                        model=model,
+                    )
+            except HTTPException as error:
+                sys.exit(f"{error.status_code}: {error.detail}")
+            except answering_runs.CacheUnavailable as error:
+                sys.exit(str(error))
+    finally:
+        await cache.close()
+        await engine.dispose()
+
+    print(f"已提交问答运行：{run.id}（任务 {job.id}，状态 {run.state}）")
+    print(f"缓存 TTL：{settings.answer_cache_ttl_seconds} 秒——**到期即焚**，之后内容不可再取")
+    print()
+    print("启动 worker：python -m app.cli run-worker --once")
+    print(f"查看结果：  python -m app.cli answer-run --as {username} --run {run.id}")
+
+
+async def answer_run_command(username: str, run_id: str) -> None:
+    """查看一次问答运行（设计 §9.1、§9.4）；需 review.decide。
+
+    ⚠️ **正文只在短期缓存里**：运行记录按 §21「客户数据不落库」只存元数据与哈希。缓存过期、
+    或未配置缓存时，这里会**如实显示「内容不可用」**，不会拿别的东西冒充。
+    """
+    settings = get_settings()
+    cache = answer_cache.from_settings(settings)
+    try:
+        async with SessionFactory() as session:
+            try:
+                async with session.begin():
+                    principal = await cli_principal(session, username, REVIEW_DECIDE)
+                run = await session.get(AnswerRun, UUID(run_id))
+                if run is None or run.organization_id != principal.organization_id:
+                    sys.exit("运行记录不存在")
+                # 任务状态一并取出（见下面打印处的说明）
+                job = await session.scalar(
+                    select(Job)
+                    .where(Job.payload["run_id"].astext == str(run.id))
+                    .order_by(Job.created_at.desc())
+                    .limit(1)
+                )
+                question = await answering_runs.read_question(cache, run.id)
+                answer = await answering_runs.read_answer(cache, run.id)
+            except HTTPException as error:
+                sys.exit(f"{error.status_code}: {error.detail}")
+    finally:
+        await cache.close()
+        await engine.dispose()
+
+    print(f"运行：{run.id}")
+    print(f"状态：{run.state}（上一步 {run.previous_state or '—'}）　门禁：{run.blocked_by or '—'}")
+    print(f"发布：{run.published}　待审：{run.review_required and run.reviewed_at is None}")
+    print(
+        f"证据：{len(run.evidence)} 条　耗时：{run.seconds if run.seconds is None else f'{run.seconds:.1f}s'}"
+    )
+    # **任务状态要一并显示**：运行记录与任务是两套状态——运行记录说「这次问答走到哪」，任务表说
+    # 「试了几次、成没成」。永久失败时运行记录会停在最后一次尝试的状态（不会自动置 FAILED，
+    # 否则重试会撞上终态），所以**任务状态才是判断「卡住了」的关键**。
+    if job is not None:
+        attempts = f"{job.attempt_count}/{job.max_attempts}"
+        extra = f"　错误：{job.error_code}" if job.error_code else ""
+        print(f"任务：{job.status}（尝试 {attempts}）{extra}")
+    else:
+        print("任务：—（同步问答没有任务）")
+    print(f"配置：{run.config}")
+    if run.reviewed_at:
+        print(f"复核：{run.reviewed_by} @ {run.reviewed_at}　{run.review_note or ''}")
+    print()
+    if answer is None:
+        print("内容不可用：短期缓存已过期、未配置缓存，或这次运行没产出内容。")
+        print("（运行记录里不存问题与回答正文——设计 §21「客户数据不落库」，只留 sha256。）")
+        return
+    print("—— 问题（脱敏后）——")
+    print(question or "（问题已过期）")
+    print()
+    print("—— 回答（脱敏后）——")
+    print(answer)
 
 
 async def flag_stale_pages_command(username: str, dry_run: bool) -> None:
@@ -858,6 +961,18 @@ def main() -> None:
     ask.add_argument("--limit", type=int, default=5, help="取多少条依据（默认 5）")
     ask.add_argument("--max-new-tokens", type=int, default=512, help="最多生成多少 token")
     ask.add_argument("--model", default=None, help="覆盖生成模型（默认取配置里的）")
+    ask.add_argument(
+        "--async",
+        dest="run_async",
+        action="store_true",
+        help="异步执行：提交后立刻返回 run id，由 worker 在后台跑（需 CACHE_URL）",
+    )
+
+    answer_run = commands.add_parser(
+        "answer-run", help="查看一次问答运行（含短期缓存里的问题与回答，脱敏后）"
+    )
+    answer_run.add_argument("--as", dest="actor", required=True, help="执行操作的用户名")
+    answer_run.add_argument("--run", required=True, help="运行记录 id")
 
     answer_runs = commands.add_parser(
         "answer-runs", help="列出问答运行记录；--pending 只看待人工复核（设计 §9.1、§9.3）"
@@ -970,9 +1085,12 @@ def main() -> None:
         return
 
     if args.command == "ask":
-        asyncio.run(
-            ask_command(args.actor, args.question, args.limit, args.max_new_tokens, args.model)
-        )
+        handler = ask_async_command if args.run_async else ask_command
+        asyncio.run(handler(args.actor, args.question, args.limit, args.max_new_tokens, args.model))
+        return
+
+    if args.command == "answer-run":
+        asyncio.run(answer_run_command(args.actor, args.run))
         return
 
     if args.command == "answer-runs":

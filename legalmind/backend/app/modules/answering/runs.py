@@ -24,13 +24,22 @@ from hashlib import sha256
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.adapters.cache import AnswerCache, cache_key
 from app.core.security import Principal
 from app.models import (
     ANSWER_RUN_TERMINAL_STATES,
     ANSWER_RUN_TRANSITIONS,
     AnswerRun,
+    Job,
 )
 from app.modules.authorization.grants import record_audit
+from app.modules.redaction.service import redact
+
+#: 异步问答的任务类型。
+QUESTION_JOB = "answer.question"
+#: 幂等键里带的配置版本——**改了检索参数、提示词或生成模型就要递增**，否则同一个 run 重投会被
+#: 幂等键挡住（同一个 run 只会投一次，这里的版本号是为了让「配置变了」这件事在键上留痕）。
+ANSWER_CONFIG_VERSION = "1"
 
 
 class IllegalTransition(RuntimeError):
@@ -94,6 +103,29 @@ def evidence_refs(citations, cited_ids: tuple[str, ...] = ()) -> list[dict]:
     ]
 
 
+def apply_run_result(
+    run: AnswerRun, *, question: str, answer, tracker: RunTracker, config: dict
+) -> AnswerRun:
+    """把一次运行的**结果**填进运行记录。
+
+    **新建与更新走同一条路**：同步问答在这里建行；异步问答在 `submit_question` 时就建了行
+    （状态 `CREATED`），执行完只更新它。⚠️ 实测踩过：异步路径早期让 `record_run` 又建了一行，
+    结果**同一次运行留下两条记录**——一条只有状态、一条只有结果。**一次运行只能有一行。**
+    """
+    run.state = tracker.state
+    run.previous_state = tracker.previous
+    run.question_sha256 = _digest(question) or run.question_sha256
+    run.answer_sha256 = _digest(answer.answer)
+    run.evidence = evidence_refs(answer.citations, answer.cited_evidence_ids)
+    run.config = config
+    run.blocked_by = answer.blocked_by
+    run.published = answer.published
+    run.seconds = answer.seconds
+    # 待审队列只收 `NEEDS_REVIEW`——`PARTIAL` 是「限制回答范围」，按 §9.4 不必转人工
+    run.review_required = tracker.state == "NEEDS_REVIEW"
+    return run
+
+
 async def record_run(
     session: AsyncSession,
     *,
@@ -102,24 +134,19 @@ async def record_run(
     answer,
     tracker: RunTracker,
     config: dict,
+    run: AnswerRun | None = None,
 ) -> AnswerRun:
-    """把一次运行落库。**调用方负责事务**。"""
-    run = AnswerRun(
-        state=tracker.state,
-        previous_state=tracker.previous,
-        organization_id=principal.organization_id,
-        requested_by=principal.user_id,
-        question_sha256=_digest(question) or "",
-        answer_sha256=_digest(answer.answer),
-        evidence=evidence_refs(answer.citations, answer.cited_evidence_ids),
-        config=config,
-        blocked_by=answer.blocked_by,
-        published=answer.published,
-        seconds=answer.seconds,
-        # 待审队列只收 `NEEDS_REVIEW`——`PARTIAL` 是「限制回答范围」，按 §9.4 不必转人工
-        review_required=tracker.state == "NEEDS_REVIEW",
-    )
-    session.add(run)
+    """把一次运行落库。**调用方负责事务**。
+
+    ``run`` 给了就**更新它**（异步路径在 `submit_question` 时已经建好行），没给就新建。
+    """
+    if run is None:
+        run = AnswerRun(
+            organization_id=principal.organization_id,
+            requested_by=principal.user_id,
+        )
+        session.add(run)
+    apply_run_result(run, question=question, answer=answer, tracker=tracker, config=config)
     await session.flush()
     return run
 
@@ -170,3 +197,93 @@ async def mark_reviewed(
     )
     await session.flush()
     return run
+
+
+class CacheUnavailable(RuntimeError):
+    """未配置短期缓存（`CACHE_URL` 为空）时提交异步问答。
+
+    **异步靠缓存交付结果**——调用方拿到的是 run id，答案要自己去缓存里取。没有缓存就没有结果
+    可交付，所以这里**直接拒绝**，而不是让它跑完再发现取不到。同步问答不受影响。
+    """
+
+
+def question_key(run_id) -> str:
+    """问题的缓存键。
+
+    **问题也要经缓存**：异步的 worker 在另一个进程里，问题得传过去；而 `jobs.payload` 是**数据库
+    里的 JSONB**——把问题写进去就违反 §21「客户数据不落库」。所以问题走短期缓存，与答案同命运
+    （TTL 到期即焚）。
+    """
+    return f"legalmind:question:{run_id}"
+
+
+async def submit_question(
+    session: AsyncSession,
+    principal: Principal,
+    question: str,
+    *,
+    cache: AnswerCache,
+    limit: int = 5,
+    max_new_tokens: int = 512,
+    model: str | None = None,
+) -> tuple[AnswerRun, Job]:
+    """提交一次异步问答（设计 §9.4）：建运行记录（`CREATED`）+ 投递任务，**立刻返回**。
+
+    ⚠️ **问题先脱敏再进缓存**（它必须经缓存传给 worker）。这带来一个**有意的不对称**：同步问答
+    用原问题检索，异步用脱敏后的问题——因为只有异步的问题需要离开进程。脱敏只替换身份证 / 案号 /
+    电话这类标识，不影响检索（语料是法律法规，不含这些）。
+
+    ⚠️ `question_sha256` 取**脱敏后**文本的哈希：短问题的原文哈希可被穷举反推（比如一个身份证号），
+    脱敏后的哈希没有这个风险。
+    """
+    if not cache.available:
+        raise CacheUnavailable("未配置短期缓存（CACHE_URL），无法提交异步问答；请改用同步 ask")
+
+    redacted_question, _ = redact(question)
+    run = AnswerRun(
+        state="CREATED",
+        organization_id=principal.organization_id,
+        requested_by=principal.user_id,
+        question_sha256=_digest(redacted_question) or "",
+        evidence=[],
+        config={"limit": limit, "max_new_tokens": max_new_tokens, "model": model},
+        published=False,
+        review_required=False,
+    )
+    session.add(run)
+    await session.flush()
+
+    await cache.put(question_key(run.id), redacted_question)
+
+    job = Job(
+        job_type=QUESTION_JOB,
+        # **只放 run id 与参数，不放问题**——问题在缓存里（见 `question_key` 的注释）
+        payload={
+            "run_id": str(run.id),
+            "limit": limit,
+            "max_new_tokens": max_new_tokens,
+            "model": model,
+        },
+        idempotency_key=f"{run.id}:{QUESTION_JOB}:{ANSWER_CONFIG_VERSION}",
+        status="pending",
+        attempt_count=0,
+        max_attempts=3,
+    )
+    session.add(job)
+    await session.flush()
+    return run, job
+
+
+async def read_question(cache: AnswerCache, run_id) -> str | None:
+    return await cache.get(question_key(run_id))
+
+
+async def store_answer(cache: AnswerCache, run_id, text: str) -> bool:
+    """把**已脱敏**的答案写进短期缓存。调用方负责先脱敏（见 `workers.handlers`）。"""
+    return await cache.put(cache_key(run_id), text)
+
+
+async def read_answer(cache: AnswerCache, run_id) -> str | None:
+    """取回当时的答案。**取不到就是取不到**——TTL 到期、没配缓存、或本来就失败，一律返回 None，
+    由调用方如实显示「内容不可用」，而不是拿别的东西冒充。"""
+    return await cache.get(cache_key(run_id))

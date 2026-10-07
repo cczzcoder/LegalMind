@@ -57,6 +57,13 @@ class Settings(BaseSettings):
     # 证据装配按它算预算（`app/modules/answering/assembly.py`）：超了 Ollama 会**静默从前面截断**，
     # 而指令就在提示的最前面——那等于模型失去了全部约束（设计 §9.4 明令不得无提示截断）。
     generation_context_tokens: int = 8192
+    # 短期内容缓存（设计 §9.3 第三层、§21）。**只用于待审队列的「当时答了什么」**——
+    # 运行记录里只有元数据与哈希（客户数据不落库），复核人要看内容只能靠它。
+    # **留空即禁用**：此时异步问答拒绝提交（提交方靠缓存取结果），同步问答照常。
+    cache_url: str = ""
+    # 缓存 TTL（秒），默认 24 小时。**到期即焚**——数据最小化，不进主库也不进备份。
+    answer_cache_ttl_seconds: int = 86400
+
     # 模型权重下载源。本机 HuggingFace 直连不通，默认走镜像（其元数据 API 403 不影响下载）。
     hf_endpoint: str = "https://hf-mirror.com"
 

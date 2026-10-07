@@ -8,6 +8,9 @@ x-backend-environment: &backend-environment
   TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
   STORAGE_ROOT: /data/artifacts
   MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-52428800}
+  # 容器内走服务名；宿主机跑 worker/CLI 时用 .env 里的 127.0.0.1
+  CACHE_URL: redis://redis:6379/0
+  ANSWER_CACHE_TTL_SECONDS: ${ANSWER_CACHE_TTL_SECONDS:-86400}
 
 services:
   postgres:
@@ -26,6 +29,29 @@ services:
         - pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB
       interval: 5s
       timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    # 短期内容缓存（设计 §9.3 第三层、§14.1）。**只作 TTL 键值存储，不作队列**——
+    # 队列用自研 worker（FOR UPDATE SKIP LOCKED 原子领取 + 租约），**Celery 仍不引入**。
+    image: redis:7-alpine
+    # ⚠️ **关掉全部持久化**：缓存里是「跑过脱敏的回答」，要求「过期即焚」。
+    # 开了 RDB/AOF 就会落盘、进而进备份，那就等于变相落库了。
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - 64mb
+      - --maxmemory-policy
+      - allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
       retries: 20
     restart: unless-stopped
 

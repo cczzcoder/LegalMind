@@ -87,8 +87,14 @@ async def import_document(
             job = Job(
                 job_type=PARSE_JOB,
                 payload={"document_id": str(artifact.id)},
-                # 公共数据全局共享（设计 21.2）：幂等键不含组织
-                idempotency_key=f"{sha256}:{PARSE_JOB}:{PARSE_CONFIG_VERSION}",
+                # 幂等键用**原件 ID** 而不是文件哈希（设计 §7.1、V1.35 修正）：
+                # 撤下原件只把任务标成 `cancelled`、**任务行保留**（审计要留痕），若键含哈希，
+                # 同一份文件撤下后就再也导不进来——重导会撞 `uq_job_idempotency` 报 409
+                # 「Document already imported」，可那份原件其实已经不存在了。
+                # 「同一份文件不重复登记」由 `uq_source_artifact_sha256` 保证，幂等键只需把
+                # 任务绑到它自己那份原件上；与 `answering/runs.py` 的 `{run.id}:{job}:{config}`
+                # 同一口径。公共数据全局共享（设计 21.2）：键中仍不含组织。
+                idempotency_key=f"{artifact.id}:{PARSE_JOB}:{PARSE_CONFIG_VERSION}",
                 status="pending",
                 attempt_count=0,
                 max_attempts=3,

@@ -1,7 +1,8 @@
 """撤下原件集成测试（设计 §15.3）：需要 TEST_DATABASE_URL。
 
 覆盖：撤下后原件、解析版本、分块、定位、脱敏映射全部删除且文件移除；同一版本还有别的合法来源
-原件时版本保留并从该原件重建；**整批撤下**不会让待撤下的原件互相「重建」；dry-run 只输出计划。
+原件时版本保留并从该原件重建；**整批撤下**不会让待撤下的原件互相「重建」；dry-run 只输出计划；
+**撤下后同一份文件可以重新导入**（V1.35 修正的幂等键问题）。
 """
 
 from uuid import uuid4
@@ -27,7 +28,12 @@ from app.models import (
 )
 from app.modules.documents.withdrawal import withdraw_documents
 from app.modules.parsing.service import parse_artifact
-from tests.helpers import import_document_for_parsing
+from tests.helpers import (
+    import_document_for_parsing,
+    import_document_into_source,
+    login,
+    setup_source,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -433,3 +439,56 @@ async def test_withdraw_requires_a_reason(make_client, make_user, storage, sessi
 
     async with session_factory() as session:
         assert await session.get(SourceArtifact, document_id) is not None
+
+
+async def test_withdrawn_document_can_be_imported_again(
+    make_client, make_user, storage, session_factory
+):
+    """撤下原件后，**同一份文件必须能重新导入**（V1.35 修正）。
+
+    此前任务幂等键含文件哈希，而撤下只把任务标成 `cancelled`、**任务行保留**（审计要留痕），
+    于是重导会撞 `uq_job_idempotency` 报 409「Document already imported」——**可那份原件其实
+    已经不存在了**，提示语还把人往错的方向引。现在键用原件 ID，「同一份文件不重复登记」交给
+    `uq_source_artifact_sha256` 保证（那份约束仍在，见 test_documents_integration 的 409 用例）。
+    """
+    content = law_text(law_name())
+    _admin, editor, source_id = await setup_source(make_client, make_user)
+    first = await import_document_into_source(
+        make_client, editor, source_id, content, "重导测试.txt"
+    )
+
+    async with session_factory() as session:
+        await withdraw_documents(session, _principal(editor), storage, [first], reason=REASON)
+
+    # 撤下后原件确实没了
+    async with session_factory() as session:
+        assert await session.get(SourceArtifact, first) is None
+
+    async with make_client() as client:
+        await login(client, editor.username)
+        again = await client.post(
+            "/api/v1/documents",
+            params={
+                "source_id": source_id,
+                "filename": "重导测试.txt",
+                "sensitivity": "public",
+                "access_scope": "organization",
+            },
+            content=content,
+            headers={"Content-Type": "application/octet-stream"},
+        )
+
+    assert again.status_code == 202, again.text
+    second = again.json()["document"]["id"]
+    assert second != str(first)
+
+    # 新原件拿到的是**新**任务（pending）；旧任务仍是 cancelled，行保留作审计痕迹
+    async with session_factory() as session:
+        statuses = list(
+            await session.scalars(
+                select(Job.status)
+                .where(Job.payload["document_id"].astext == str(second))
+                .order_by(Job.created_at)
+            )
+        )
+    assert statuses == ["pending"]

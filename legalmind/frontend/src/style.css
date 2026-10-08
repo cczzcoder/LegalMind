@@ -26,6 +26,56 @@ body {
   line-height: 1.75;
 }
 
+/*
+ * 触控目标 ≥ 44×44 px（《前端界面说明》§4）。
+ *
+ * 为什么破例放在全局：这是**无障碍底线**，不是某个页面的业务样式——漏掉一个页面就等于漏掉
+ * 一条要求，所以不按页写、也不堆业务类名。44×44 取自 Apple HIG 与 WCAG 2.1 的触控目标建议。
+ *
+ * 断点取 992，与 `AppShell` 的 `useDrawer = !screens.lg` 同源：lg 以上是桌面、鼠标精度足够，
+ * 保持 antd 默认的 32px，免得整页按钮都变笨重。
+ *
+ * ⚠️ 只撑大**盒子**，不动图标与文字的字号——变大的是可点区域。
+ * （`min-height` / `min-width` 会盖住 antd 写死的 `height` / `width`，不需要 `!important`。）
+ */
+@media (max-width: 991px) {
+  .ant-btn {
+    min-height: 44px;
+  }
+
+  /* 纯图标按钮（汉堡、复制完整标识、登出）还得补宽度 */
+  .ant-btn.ant-btn-icon-only {
+    min-width: 44px;
+  }
+
+  /* 抽屉自带的关闭按钮（实测 24×24） */
+  .ant-drawer-close {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /*
+   * 菜单项：整行 44px，并且**让行内的链接铺满整行**——否则真正的热区只有文字那一小块
+   * （实测「问答」28×18、「条款检索」56×18，点在行的空白处不会跳转）。
+   */
+  .ant-menu-item {
+    height: 44px;
+    line-height: 44px;
+  }
+
+  .ant-menu-item .ant-menu-title-content {
+    height: 44px;
+  }
+
+  .ant-menu-item .ant-menu-title-content > a {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    min-width: 44px;
+    height: 44px;
+  }
+}
+
 /* 尊重系统的「减少动态效果」偏好（无障碍） */
 @media (prefers-reduced-motion: reduce) {
   *,

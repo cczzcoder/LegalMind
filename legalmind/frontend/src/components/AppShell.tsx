@@ -87,7 +87,11 @@ export function AppShell({ pattern, children }: { pattern: string; children: Rea
           />
         )}
         <Typography.Text strong style={{ color: "#fff", fontSize: 16, whiteSpace: "nowrap" }}>
-          <Link to="/ask" style={{ color: "#fff" }}>
+          {/*
+            ⚠️ 上下 `padding` 是**触控目标**（§4），不是留白：不加的话这个链接只有 85×20，
+            手指点不准。字号与文字位置都没变——`inline-block` 只是让内边距真的撑开盒子。
+          */}
+          <Link to="/ask" style={{ color: "#fff", display: "inline-block", padding: "12px 0" }}>
             LegalMind
           </Link>
         </Typography.Text>

@@ -19,6 +19,28 @@ body {
     sans-serif;
 }
 
+/*
+ * 顶栏右侧的用户名必须**能截断**。
+ *
+ * `Space` 是 flex 容器，而 flex item 的默认 `min-width: auto` 会阻止它缩到内容宽度以下——
+ * 于是长用户名把整个顶栏撑出横向滚动条（实测 375px 下溢出 92px，整页出现左右滚动）。
+ * 这两条放开之后，`Typography.Text` 的 `ellipsis` 才真的生效。**与屏幕宽度无关，所以不在
+ * 下面的触控媒体查询里。**
+ */
+.header-user,
+.header-user > .ant-space-item {
+  min-width: 0;
+}
+
+/*
+ * 再给用户名一个上限：`ellipsis` 只负责「超出就截断」，**不负责决定能有多宽**——
+ * 没有上限时它会一直占着自然宽度，把后面的登出按钮顶出视口。30vw 在 375 上是 112px，
+ * 够看清是谁；完整值走 tooltip（`ellipsis={{ tooltip }}`）。
+ */
+.header-user .ant-typography {
+  max-width: 30vw;
+}
+
 /* 中文长句与长 id 都要能断，避免出现横向滚动条 */
 .long-text {
   white-space: pre-wrap;
@@ -39,6 +61,14 @@ body {
  * （`min-height` / `min-width` 会盖住 antd 写死的 `height` / `width`，不需要 `!important`。）
  */
 @media (max-width: 991px) {
+  /*
+   * 顶栏内边距：antd 的 `Layout.Header` 默认左右各 50px，窄屏上白白吃掉 100px。
+   * 收到 12px，与内容区的窄屏内边距（`AppShell` 里 `screens.md ? 24 : 12`）一致。
+   */
+  .ant-layout-header {
+    padding-inline: 12px;
+  }
+
   .ant-btn {
     min-height: 44px;
   }

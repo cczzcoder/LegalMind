@@ -22,6 +22,7 @@ const LoginPage = lazy(() => import("./pages/LoginPage"));
 const AskPage = lazy(() => import("./pages/AskPage"));
 const AnswerRunPage = lazy(() => import("./pages/AnswerRunPage"));
 const ReviewQueuePage = lazy(() => import("./pages/ReviewQueuePage"));
+const LegalVersionsPage = lazy(() => import("./pages/LegalVersionsPage"));
 const SearchPage = lazy(() => import("./pages/SearchPage"));
 const WikiPage = lazy(() => import("./pages/WikiPage"));
 const DocumentsPage = lazy(() => import("./pages/DocumentsPage"));
@@ -32,6 +33,7 @@ const PAGES: Record<string, (params: RouteParams) => ReactNode> = {
   "/ask": () => <AskPage />,
   "/answers/:id": (params) => <AnswerRunPage runId={params.id} />,
   "/review": () => <ReviewQueuePage />,
+  "/versions": () => <LegalVersionsPage />,
   "/search": () => <SearchPage />,
   "/wiki": () => <WikiPage />,
   "/wiki/:pageId": (params) => <WikiPage pageId={params.pageId} />,

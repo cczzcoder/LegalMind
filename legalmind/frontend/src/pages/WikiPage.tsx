@@ -324,7 +324,11 @@ function WikiDetail({ pageId }: { pageId: string }) {
           <Form layout="vertical" disabled={busy}>
             <Form.Item
               label="正文"
-              extra="当前按纯文本保存与展示。保存会产生一条**新修订**，不覆盖历史。"
+              extra={
+                <>
+                  当前按纯文本保存与展示。保存会产生一条<strong>新修订</strong>，不覆盖历史。
+                </>
+              }
             >
               <Input.TextArea
                 rows={14}
@@ -366,7 +370,12 @@ function WikiDetail({ pageId }: { pageId: string }) {
               type="error"
               showIcon
               message="保存冲突：这条修订已经被别人改过了"
-              description="当前版本不会自动合并。请**先把上面的文字复制出去**，再点「刷新」重新打开页面，然后把你的修改重新粘进去。"
+              description={
+                <>
+                  当前版本不会自动合并。请<strong>先把上面的文字复制出去</strong>，再点「刷新」
+                  重新打开页面，然后把你的修改重新粘进去。
+                </>
+              }
             />
           )}
         </Card>
@@ -374,7 +383,7 @@ function WikiDetail({ pageId }: { pageId: string }) {
 
       <Card title="引用条款">
         <Typography.Paragraph type="secondary">
-          引用的是**具体条款版本**（不是「最新条款」），发布前至少要有一条引用。
+          引用的是<strong>具体条款版本</strong>（不是「最新条款」），发布前至少要有一条引用。
         </Typography.Paragraph>
 
         {citations.length === 0 ? (
@@ -447,7 +456,7 @@ function WikiDetail({ pageId }: { pageId: string }) {
               </Button>
             </Space.Compact>
             <Typography.Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0 }}>
-              ⚠️ 目前只能粘贴条款版本 id，**还没有「从检索结果直接引用」的选择器**。
+              ⚠️ 目前只能粘贴条款版本 id，<strong>还没有「从检索结果直接引用」的选择器</strong>。
             </Typography.Paragraph>
           </>
         )}

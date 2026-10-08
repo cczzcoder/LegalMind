@@ -52,6 +52,13 @@ export const NAV: NavItem[] = [
     hint: "被门禁拦下的运行在这里等人判读；复核不改变运行状态。",
   },
   {
+    path: "/versions",
+    label: "版本复核",
+    icon: "audit",
+    permission: PERMISSIONS.reviewDecide,
+    hint: "低置信度落库的法律版本在这里等人确认；复核只改审核状态，不改效力状态。",
+  },
+  {
     path: "/search",
     label: "条款检索",
     icon: "search",

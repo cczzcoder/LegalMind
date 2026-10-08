@@ -207,6 +207,29 @@ export type ImportResult = {
   job_id: string;
 };
 
+/**
+ * 法律版本（供人工复核页展示）。与后端 `legal_corpus/schemas.py` 的 `LegalVersionOut` 对齐。
+ *
+ * ⚠️ **两个状态是两件事，页面上必须分开显示**：
+ * - `legal_status` 是**法律事实**（现行有效 / 已公布未生效 / 已废止 / 未知），**复核改不了它**；
+ * - `review_status` 是**数据质量标记**（待审 / 已确认 / 已驳回），复核改的就是它。
+ */
+export type LegalVersion = {
+  id: string;
+  instrument_title: string;
+  version_label: string;
+  legal_status: string;
+  review_status: string;
+  promulgated_on: string | null;
+  effective_from: string | null;
+  /** 主原件文件名；允许先登记版本、后导入文件，所以可空 */
+  artifact_filename: string | null;
+  created_at: string;
+};
+
+/** 复核结论。**没有 `pending`**——那是「机器没把握」，不是人能做出的结论。 */
+export type ReviewVersionDecision = "approved" | "rejected";
+
 /** 解析任务。`status` 见 `jobs/service.py`；**资源不足会记 `resource_exhausted`**，不伪装成功（FR-13）。 */
 export type JobRecord = {
   id: string;

@@ -50,8 +50,8 @@ export default function ReviewQueuePage() {
         }
       >
         <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-          复核**不改变运行状态**——状态机记的是「当时怎么走的」，复核是之后发生的另一件事，
-          结论写在复核备注里并写审计。
+          复核<strong>不改变运行状态</strong>——状态机记的是「当时怎么走的」，复核是之后发生的
+          另一件事，结论写在复核备注里并写审计。
         </Typography.Paragraph>
       </Card>
 

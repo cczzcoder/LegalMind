@@ -11,6 +11,7 @@ from app.core.errors import register_error_handling
 from app.modules.answering.router import router as answering_router
 from app.modules.documents.router import router as documents_router
 from app.modules.identity.router import router as identity_router
+from app.modules.legal_corpus.router import router as legal_corpus_router
 from app.modules.retrieval.router import router as retrieval_router
 from app.modules.sources.router import router as sources_router
 from app.modules.wiki.router import router as wiki_router
@@ -45,6 +46,7 @@ app.include_router(sources_router, prefix="/api/v1")
 app.include_router(documents_router, prefix="/api/v1")
 app.include_router(retrieval_router, prefix="/api/v1")
 app.include_router(answering_router, prefix="/api/v1")
+app.include_router(legal_corpus_router, prefix="/api/v1")
 
 
 @app.get("/health/live", tags=["health"])

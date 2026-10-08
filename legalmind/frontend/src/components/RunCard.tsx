@@ -65,7 +65,10 @@ export function RunCard({ run, extra }: { run: AnswerRun; extra?: React.ReactNod
         </Typography.Text>
 
         <Space size={8} wrap>
-          <Link to={`/answers/${run.id}`}>查看详情</Link>
+          {/* `tap-target`：窄屏下把只有一行文字高的链接撑到 ≥44px（《前端界面说明》§4） */}
+          <Link className="tap-target" to={`/answers/${run.id}`}>
+            查看详情
+          </Link>
           <CopyableId value={run.id} />
         </Space>
 

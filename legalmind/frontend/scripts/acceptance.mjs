@@ -15,10 +15,15 @@
  *
  * 可用环境变量覆盖：
  *   ACCEPTANCE_BASE     默认 http://127.0.0.1:5173
- *   ACCEPTANCE_USER     默认 ui-editor（免 MFA 的角色，见 CONTRIBUTING）
- *   ACCEPTANCE_PASSWORD 默认 UiEditor2026!
- *   ACCEPTANCE_ROUTES   默认 #/ask,#/search,#/documents,#/wiki（逗号分隔；待审队列需 review.decide）
+ *   ACCEPTANCE_USER     默认 ui-version-reviewer
+ *   ACCEPTANCE_PASSWORD 默认 UiVersion2026!
+ *   ACCEPTANCE_ROUTES   默认见下面 ROUTES（逗号分隔）
  *   ACCEPTANCE_SHOTS    默认 1（截图落到 .acceptance/，已 gitignore）；置 0 关闭
+ *
+ * ⚠️ **默认账号是 `legal_reviewer`**（不是 `ui-editor`）：`legal_reviewer` 同时有
+ * `document.read` 与 `review.decide`，于是**七个页面都能走到**（含待审队列与版本复核）；
+ * `ui-editor` 没有 `review.decide`，那两个页面会 403 而被当成「失败请求」。
+ * 代价是它没有 `document.write`，**文献管理页的上传按钮不会渲染**——那一个按钮不在本脚本覆盖内。
  *
  * 浏览器用**本机已装的 Chrome**（`channel: "chrome"`），不下载 Chromium。
  */
@@ -30,9 +35,11 @@ import { chromium } from "playwright-core";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BASE = process.env.ACCEPTANCE_BASE ?? "http://127.0.0.1:5173";
-const USER = process.env.ACCEPTANCE_USER ?? "ui-editor";
-const PASSWORD = process.env.ACCEPTANCE_PASSWORD ?? "UiEditor2026!";
-const ROUTES = (process.env.ACCEPTANCE_ROUTES ?? "#/ask,#/search,#/documents,#/wiki").split(",");
+const USER = process.env.ACCEPTANCE_USER ?? "ui-version-reviewer";
+const PASSWORD = process.env.ACCEPTANCE_PASSWORD ?? "UiVersion2026!";
+const ROUTES = (
+  process.env.ACCEPTANCE_ROUTES ?? "#/ask,#/review,#/versions,#/search,#/documents,#/wiki"
+).split(",");
 const SHOTS = process.env.ACCEPTANCE_SHOTS !== "0";
 
 /** §4：这三档是验收口径，改这里等于改规格，别顺手加。 */

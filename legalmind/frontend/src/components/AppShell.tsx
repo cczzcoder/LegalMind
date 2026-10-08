@@ -1,4 +1,5 @@
 import {
+  AuditOutlined,
   BookOutlined,
   FileSearchOutlined,
   FolderOpenOutlined,
@@ -31,6 +32,7 @@ import { useSession } from "../app/session-context";
 const ICONS: Record<string, ReactNode> = {
   question: <MessageOutlined />,
   review: <SafetyCertificateOutlined />,
+  audit: <AuditOutlined />,
   search: <FileSearchOutlined />,
   book: <BookOutlined />,
   folder: <FolderOpenOutlined />,
@@ -103,15 +105,29 @@ export function AppShell({ pattern, children }: { pattern: string; children: Rea
           用户名比角色标签和登出按钮低 15px（实测 top 33 vs 18 / 10）。
           把行高归位后，行盒高度贴着内容，由外层 header 的 `align-items: center` 居中。
         */}
-        <Space size={8} style={{ lineHeight: 1 }}>
-          <Typography.Text style={{ color: "rgba(255,255,255,0.85)" }} ellipsis>
+        {/*
+          ⚠️ `header-user` 这个类**不是样式偏好**：`Space` 是 flex 容器，而 flex item 默认
+          `min-width: auto`——不放开就压不下去，**长用户名会把整个顶栏撑出横向滚动条**
+          （实测 375px 下溢出 92px）。放开之后用户名按 `ellipsis` 截断，完整值走 tooltip。
+        */}
+        <Space className="header-user" size={8} style={{ lineHeight: 1 }}>
+          <Typography.Text
+            style={{ color: "rgba(255,255,255,0.85)" }}
+            ellipsis={{ tooltip: user?.username }}
+          >
             {user?.username}
           </Typography.Text>
-          {user?.roles.slice(0, 1).map((role) => (
-            <Tag key={role} color="blue" style={{ marginInlineEnd: 0 }}>
-              {role}
-            </Tag>
-          ))}
+          {/*
+            ⚠️ **窄屏不渲染角色标签**（`< md`）：一个 `legal_reviewer` 标签就有 97px 宽，
+            加上长用户名与登出按钮，375px 下**顶栏必然被撑破**（实测横向溢出 92px）。
+            角色不是导航必需信息，让位给用户名与登出。
+          */}
+          {screens.md &&
+            user?.roles.slice(0, 1).map((role) => (
+              <Tag key={role} color="blue" style={{ marginInlineEnd: 0 }}>
+                {role}
+              </Tag>
+            ))}
           <Button
             type="text"
             aria-label="退出登录"

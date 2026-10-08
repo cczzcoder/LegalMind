@@ -66,9 +66,10 @@ def download(name: str, *, force: bool = False) -> Path:
         weights=_WEIGHT_FILES,
         force=force,
     )
-    if not (directory / "config.json").is_file():
+    # ⚠️ 收尾校验要连**权重**一起看，理由见 `hf_mirror.is_complete` 的注释
+    if not hf_mirror.is_complete(directory, _WEIGHT_FILES):
         raise RuntimeError(
-            f"{spec.name} 的 config.json 没下下来，检查 {get_settings().hf_endpoint}"
+            f"{spec.name} 没下全（缺 config.json 或权重），检查 {get_settings().hf_endpoint}"
         )
     return directory
 
@@ -88,8 +89,9 @@ def load(name: str):
             "缺少本地嵌入依赖。安装：.venv/Scripts/python.exe -m pip install -e .[embeddings]"
         ) from error
     directory = model_dir(name)
-    if not (directory / "config.json").is_file():
-        print(f"首次使用，下载 {name} 权重 …", flush=True)
+    # ⚠️ **别只看 config.json**（理由见 `hf_mirror.is_complete`）：半截目录会跳过下载、永不复发
+    if not hf_mirror.is_complete(directory, _WEIGHT_FILES):
+        print(f"首次使用（或上次没下全），下载 {name} 权重 …", flush=True)
         download(name)
     return CrossEncoder(str(directory))
 

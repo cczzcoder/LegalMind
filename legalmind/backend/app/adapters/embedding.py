@@ -78,9 +78,11 @@ def download(name: str, *, force: bool = False) -> Path:
         weights=_WEIGHT_FILES,
         force=force,
     )
-    if not (directory / "config.json").is_file():
+    # ⚠️ 收尾校验要连**权重**一起看：只查 config.json 的话，权重下失败（或中途被打断）也会被
+    # 当成「就绪」，而 `load()` 正是按这个判据决定要不要重下——于是目录**永远不会自愈**。
+    if not hf_mirror.is_complete(directory, _WEIGHT_FILES):
         raise RuntimeError(
-            f"{spec.name} 的 config.json 没下下来，检查 {get_settings().hf_endpoint}"
+            f"{spec.name} 没下全（缺 config.json 或权重），检查 {get_settings().hf_endpoint}"
         )
     print(f"模型就绪：{directory}（本次下载 {len(downloaded)} 个文件）", flush=True)
     return directory
@@ -102,8 +104,11 @@ def load(name: str):
             "（torch 体积以 GB 计，故意不放进默认依赖）"
         ) from error
     directory = model_dir(name)
-    if not (directory / "config.json").is_file():
-        print(f"首次使用，下载 {name} 权重 …", flush=True)
+    # ⚠️ **别只看 config.json**：它是第一个下的、权重是最后一个。一次被中断的首次下载会留下
+    # 「config 在、权重不在」的目录，只看 config 就会跳过下载、然后在 transformers 深处报一个
+    # 与真因无关的错，且**永不复发**（判据在 `hf_mirror.is_complete`，两个适配层共用）。
+    if not hf_mirror.is_complete(directory, _WEIGHT_FILES):
+        print(f"首次使用（或上次没下全），下载 {name} 权重 …", flush=True)
         download(name)
     return SentenceTransformer(str(directory))
 

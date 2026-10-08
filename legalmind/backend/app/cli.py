@@ -27,7 +27,7 @@ import os
 import shutil
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 from uuid import UUID
@@ -66,6 +66,7 @@ from app.modules.documents import withdrawal as documents_withdrawal
 from app.modules.identity import mfa, service
 from app.modules.identity.schemas import CreateUser
 from app.modules.legal_corpus import graph as legal_corpus_graph
+from app.modules.legal_corpus import recompute as legal_corpus_recompute
 from app.modules.legal_corpus import relink as legal_corpus_relink
 from app.modules.legal_corpus import review as legal_corpus_review
 from app.modules.sources import service as sources_service
@@ -573,6 +574,47 @@ async def relink_versions_command(
         print(f"  跳过（取不到解析产物）：{list(report.skipped)}")
     if report.created_versions:
         print(f"  ⚠️ 新建了版本：{list(report.created_versions)}")
+    if dry_run:
+        print("  这是预演，未改动任何数据；确认后去掉 --dry-run 再执行。")
+
+
+async def recompute_statuses_command(username: str, today: str | None, dry_run: bool) -> None:
+    """按日期重算法律版本的效力状态（设计 §5.1、§8.3）；需 source.manage，操作写审计。
+
+    ⚠️ **为什么这是个手动动作**：`legal_status` 原先只在落库时算一次，而**检索默认屏蔽
+    `not_yet_effective`**——「今天开始施行的法律」不重算就会**静默地从检索里消失**。
+    本项目不引入调度器（与「没有测量支撑的组件不装」同一口径），所以由人挑时机跑：
+    **每次导入新语料后跑一次**，以及在有版本临近施行日期时跑一次。
+    """
+    # ⚠️ 用 **UTC 日期**，与落库路径（`parsing/service.py` 的 `datetime.now(UTC).date()`）一致。
+    # 施行日期本是本地日期概念，两边都按 UTC 最多差不到一天——但**必须两边一致**。
+    if today:
+        try:
+            day = date.fromisoformat(today)
+        except ValueError:
+            sys.exit(f"--today 需要 YYYY-MM-DD，收到：{today}")
+    else:
+        day = datetime.now(UTC).date()
+    async with SessionFactory() as session:
+        try:
+            async with session.begin():
+                principal = await cli_principal(session, username, SOURCE_MANAGE)
+                report = await legal_corpus_recompute.recompute_statuses(
+                    session, principal, today=day, dry_run=dry_run
+                )
+        except HTTPException as error:
+            sys.exit(f"{error.status_code}: {error.detail}")
+        finally:
+            await engine.dispose()
+
+    verb = "将转为现行有效" if dry_run else "已转为现行有效"
+    print(f"按 {report.today} 重算：扫到 {report.instruments} 部有版本到期的法律。")
+    for version_id, title, label, effective_from in report.became_effective:
+        print(f"  - {title} / {label}：{verb}（施行日期 {effective_from}）　{version_id}")
+    for version_id, title, label, repealed_by in report.repealed:
+        print(f"  - {title} / {label}：被取代（由 {repealed_by}）　{version_id}")
+    if not report.became_effective and not report.repealed:
+        print("  没有需要改的。")
     if dry_run:
         print("  这是预演，未改动任何数据；确认后去掉 --dry-run 再执行。")
 
@@ -1117,6 +1159,18 @@ def main() -> None:
     review_run.add_argument("--run", required=True, help="运行记录 id")
     review_run.add_argument("--note", default=None, help="复核备注")
 
+    recompute = commands.add_parser(
+        "recompute-statuses",
+        help="按日期重算法律版本的效力状态（未生效到期转有效，旧版本随之被取代）",
+    )
+    recompute.add_argument("--as", dest="actor", required=True, help="执行操作的用户名")
+    recompute.add_argument(
+        "--today",
+        default=None,
+        help="按哪一天算（YYYY-MM-DD，默认今天）。给一个未来日期可以预演「到期那天会怎样」",
+    )
+    recompute.add_argument("--dry-run", action="store_true", help="只报告会改什么，不改数据")
+
     pending_versions = commands.add_parser(
         "pending-versions", help="列出待人工复核的法律版本（需求第 3 节「审核资料版本」）"
     )
@@ -1270,6 +1324,10 @@ def main() -> None:
 
     if args.command == "review-run":
         asyncio.run(review_run_command(args.actor, args.run, args.note))
+        return
+
+    if args.command == "recompute-statuses":
+        asyncio.run(recompute_statuses_command(args.actor, args.today, args.dry_run))
         return
 
     if args.command == "pending-versions":

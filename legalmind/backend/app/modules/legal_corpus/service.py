@@ -158,7 +158,7 @@ async def link_legal_version(
 
     if inserted.rowcount:
         provision_count = await _sync_provisions(session, principal, version, article_chunks)
-        await _repeal_superseded(session, principal, instrument, version)
+        await repeal_superseded(session, principal, instrument, version)
         result = LinkingResult(
             instrument_id=instrument.id,
             legal_version_id=version.id,
@@ -510,7 +510,7 @@ async def _get_or_create_identity(
     return identity
 
 
-async def _repeal_superseded(
+async def repeal_superseded(
     session: AsyncSession,
     principal: Principal,
     instrument: LegalInstrument,
@@ -519,6 +519,9 @@ async def _repeal_superseded(
     """新版本已生效时，把同一法律中公布更早的**有效**版本标记为被取代。
 
     只处理状态确定、公布日期已知且更早的版本；状态未知或日期缺失的一律不动，不猜（设计 §5.3）。
+
+    ⚠️ **公开函数**（原为 `_repeal_superseded`）：时间推进导致的重算
+    （`legal_corpus/recompute.py`）要复用同一份取代规则——**两处各写一遍必然会漂**。
     """
     if version.legal_status != EFFECTIVE or version.promulgated_on is None:
         return

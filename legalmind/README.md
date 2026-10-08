@@ -177,8 +177,6 @@ CI（`.github/workflows/ci.yml`）在 push 与 PR 上跑同一套门禁。
 
 ## 依赖
 
-当前依赖使用范围约束，尚未生成经过验收的锁文件。
-首次安装测试后，应锁定依赖、检查许可证和已知漏洞，
-并在正式构建中使用锁文件和固定镜像摘要。
+依赖**从锁文件装**：`backend/requirements.lock`（由 `pip-compile` 从 `pyproject.toml` 生成），CI 与本地都走它；容器镜像（postgres / redis）固定 `sha256` 摘要。⚠️ 可选的 `embeddings` extra（torch / sentence-transformers，体积以 GB 计）**不在锁里**——只在跑向量通路时才装。安装与更新方式见 `CONTRIBUTING.md`「依赖锁定」。
 
 第 1 层解析依赖均为宽松许可、纯 CPU、不联网：pdfplumber（MIT）、pypdfium2（Apache-2.0 / BSD-3-Clause）、python-docx（MIT）、lxml（BSD-3-Clause）。

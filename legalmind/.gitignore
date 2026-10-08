@@ -9,6 +9,8 @@ __pycache__/
 *.egg-info/
 node_modules/
 dist/
+# 前端验收脚本（`npm run acceptance`）的截图与报告
+frontend/.acceptance/
 data/
 backups/
 evaluations/reports/*

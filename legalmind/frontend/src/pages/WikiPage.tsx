@@ -90,7 +90,8 @@ function WikiList() {
               <List.Item>
                 <Space direction="vertical" size={2} style={{ width: "100%" }}>
                   <Space size={8} wrap>
-                    <a href={`#/wiki/${page.id}`}>
+                    {/* `tap-target`：窄屏下把这个只有一行文字高的链接撑到 ≥44px（§4） */}
+                    <a className="tap-target" href={`#/wiki/${page.id}`}>
                       <Typography.Text strong>{page.title}</Typography.Text>
                     </a>
                     {page.published_revision === null ? (

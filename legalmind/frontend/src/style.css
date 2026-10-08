@@ -74,6 +74,17 @@ body {
     min-width: 44px;
     height: 44px;
   }
+
+  /*
+   * 行内链接（如 Wiki 列表的标题）本身只有文字那一行高（实测 280×18），点不准。
+   * 用在需要的地方：`<a className="tap-target">`。**只在窄屏生效**——桌面保持原样。
+   */
+  .tap-target {
+    display: inline-flex;
+    align-items: center;
+    min-width: 44px;
+    min-height: 44px;
+  }
 }
 
 /* 尊重系统的「减少动态效果」偏好（无障碍） */

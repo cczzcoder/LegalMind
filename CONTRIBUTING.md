@@ -27,6 +27,53 @@ Lint 与格式化使用 ruff（配置见 `backend/pyproject.toml`）：`ruff che
 
 前端 lint 与格式化使用 eslint + prettier（配置见 `frontend/eslint.config.js`、`frontend/.prettierrc.json`）：`npm run lint`、`npm run format`；提交前保证 `npm run format:check` 通过。
 
+改动界面布局后另跑一次**前端验收**：`npm run acceptance`（`frontend/scripts/acceptance.mjs`，用 `playwright-core` + 本机 Chrome，不下载 Chromium）。它需要活的后端与 vite，所以**不在 CI 里**——先起服务（vite 记得带 `VITE_API_TARGET=http://127.0.0.1:8000`，否则代理连不上 `api` 服务名、登录页点了没反应），再用免 MFA 的账号跑。断言横向溢出、导航形态、触控目标 ≥ 44×44（窄屏）与失败请求，规格见 `doc/前端界面说明.md` §4、§8.1。
+
+### 提交前门禁（pre-commit）
+
+配置在仓库根的 `.pre-commit-config.yaml`。**全部是 local hook**——本机直连 GitHub 不通，远程 hook 会卡在 clone 上。装一次即可：
+
+```bash
+cd legalmind/backend
+.venv/Scripts/python.exe -m pip install pre-commit
+.venv/Scripts/pre-commit install
+```
+
+它跑的就是 CI 的那几条命令（后端 `ruff check` / `ruff format --check`，前端 `npm run lint` / `format:check`），只对**改动到的文件**生效。手动全跑：`pre-commit run --all-files`。⚠️ 不要用 `git commit --no-verify` 绕过——CI 会红，只是红得晚一点。
+
+### 依赖锁定
+
+`backend/pyproject.toml` 里是**范围约束**（`fastapi>=0.115,<1` 这种），同一个提交在不同日子装出来可能不是同一套。所以依赖**从锁文件装**：
+
+```bash
+cd legalmind/backend
+.venv/Scripts/python.exe -m pip install -r requirements.lock   # 装依赖
+.venv/Scripts/python.exe -m pip install --no-deps -e .         # 再装项目本体
+```
+
+CI 走的也是这两条。**改了 `pyproject.toml` 的依赖之后**要重新生成锁文件：
+
+```bash
+cd legalmind/backend
+.venv/Scripts/python.exe -m piptools compile pyproject.toml --extra dev --strip-extras --output-file requirements.lock
+```
+
+三点要知道的：
+
+- 锁文件**只覆盖默认依赖 + `dev`**。可选的 `embeddings`（torch / sentence-transformers，体积以 GB 计）**故意不在锁里**——它只在跑向量通路时才装，理由见设计 §9.5。
+- 重新生成会**升到当前允许的最新版本**（`pip-compile` 在输出文件已存在时会保留原有 pin；删掉重生成才是一次全面升级）。升完**先跑一遍测试再提交**。
+- 换 ruff 版本要**同时改** `.pre-commit-config.yaml` 里 pin 的那个版本，否则会出现「本地 pre-commit 过、CI 红」。
+
+### 容器镜像固定摘要
+
+`compose.yaml` 里的 `postgres` / `redis` 都写了 `@sha256:…`：`pg17`、`7-alpine` 这类 tag 是可变的，上游一重建镜像，本地与 CI 就跑在不同的字节上。升级时在本机 pull 后取新摘要替换：
+
+```bash
+docker image inspect <image> --format '{{index .RepoDigests 0}}'
+```
+
+⚠️ 摘要是**按平台**取的，当前取的是 `linux/amd64`（第一阶段开发基线，见设计 §14）。换到 arm64 机器要重新取一次。
+
 CI 见 `.github/workflows/ci.yml`：push 与 PR 自动跑后端 lint / 迁移漂移检查 / 测试，以及前端 lint / 构建。
 
 ### 本机开发（数据库在 Docker，API 在本机）

@@ -1,0 +1,53 @@
+# 提交前自动跑的门禁——`.github/workflows/ci.yml` 的本地前置版本，**同样的命令**。
+#
+# ⚠️ 全部用 `repo: local`，**不从 GitHub 拉 hook 仓库**：本机直连 GitHub 不通
+# （见 CONTRIBUTING「已知环境限制」），远程 hook 会在 `pre-commit run` 时卡在 clone 上。
+#
+# 装一次（用项目的虚拟环境）：
+#
+#   cd legalmind/backend
+#   .venv/Scripts/python.exe -m pip install pre-commit
+#   .venv/Scripts/pre-commit install
+#
+# 手动全跑：`pre-commit run --all-files`；只在明知会红时用 `git commit --no-verify` 跳过。
+
+repos:
+  - repo: local
+    hooks:
+      # 后端：与 CI 的「Lint and format」一步同一组命令。
+      # ⚠️ ruff 的版本**在这里 pin 住**，必须与 `legalmind/backend/requirements.lock`
+      # 里的 ruff 一致——两处版本不同会出现「本地过、CI 红」这种最难查的偏差。
+      # 换版本时：改锁文件（跑 pip-compile）后，把这里的版本号一起改。
+      - id: ruff-check
+        name: ruff check（后端）
+        language: python
+        additional_dependencies: ["ruff==0.16.10"]
+        entry: ruff check
+        files: ^legalmind/backend/.*\.py$
+
+      - id: ruff-format
+        name: ruff format --check（后端）
+        language: python
+        additional_dependencies: ["ruff==0.16.10"]
+        entry: ruff format --check
+        files: ^legalmind/backend/.*\.py$
+
+      # 前端：直接跑项目自己的 npm script，**不另装一份 eslint**——另装一份就没有
+      # `frontend/eslint.config.js` 里的插件与规则，检查结果会和 CI 不一致。
+      - id: frontend-lint
+        name: eslint（前端）
+        language: system
+        entry: npm --prefix legalmind/frontend run lint
+        pass_filenames: false
+        files: ^legalmind/frontend/.*\.(ts|tsx|js|mjs|cjs|css|json)$
+
+      - id: frontend-format
+        name: prettier --check（前端）
+        language: system
+        entry: npm --prefix legalmind/frontend run format:check
+        pass_filenames: false
+        files: ^legalmind/frontend/
+
+# ⚠️ 这里**故意不装** `pre-commit` 的自动更新（`pre-commit autoupdate` 对本配置无意义：
+# 全是 local hook），也没有把 `npm run acceptance` 放进来——它要活的后端与真实账号，
+# 见 `doc/前端界面说明.md` §8.1。

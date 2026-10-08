@@ -55,7 +55,12 @@ jobs:
 
       - name: Install dependencies
         working-directory: legalmind/backend
-        run: pip install ".[dev]"
+        # 依赖走**锁文件**：`pyproject.toml` 里是范围约束，同一个提交在不同日子装出来
+        # 可能不是同一套。锁文件由 `pip-compile` 生成（改依赖后要重新跑，见 CONTRIBUTING）。
+        # 项目本体用 `--no-deps` 装，免得它再把范围约束解析一遍。
+        run: |
+          pip install -r requirements.lock
+          pip install --no-deps -e .
 
       - name: Lint and format
         working-directory: legalmind/backend

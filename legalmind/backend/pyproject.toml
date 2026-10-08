@@ -35,6 +35,12 @@ dev = [
     "pytest>=8,<10",
     "httpx>=0.27,<1",
     "ruff>=0.9,<1",
+    # 提交前门禁（见仓库根的 .pre-commit-config.yaml）。它**不参与 CI 的测试步骤**，
+    # 只是让本地在提交前跑一遍和 CI 一样的命令。
+    "pre-commit>=4,<5",
+    # 生成 `requirements.lock` 用（CI 与本地都从锁文件装依赖）。改动依赖后要重新跑一次，
+    # 命令见 CONTRIBUTING「依赖锁定」。
+    "pip-tools>=7,<8",
 ]
 # 本地嵌入模型（设计 9.5：敏感资料不默认外发）。**故意不放进默认依赖**：torch 体积以 GB 计，
 # 只在要跑向量通路时才装。模型权重走 `HF_ENDPOINT=https://hf-mirror.com`——本机 HuggingFace

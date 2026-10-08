@@ -106,6 +106,12 @@ async def test_answer_without_evidence_refuses_and_never_calls_the_model(
         raise AssertionError("没有依据时不应调用生成模型")
 
     monkeypatch.setattr(generation, "generate", explode)
+    # ⚠️ **检索必须钉住**，否则这条测试会走真检索：「这个查询命中为空」会让级联落到**向量兜底**，
+    # 于是它开始加载 BGE-M3（2.2 GB）——而 `embeddings` 是**可选依赖**（torch 以 GB 计），
+    # CI 与任何干净环境都没装，测试会在 `embedding.load()` 里报「缺少本地嵌入依赖」而红。
+    # 本文件开头就写着「测试里不该加载大模型」，这条是接向量通路（V1.13）时漏下的。
+    # 要测「真检索在这个查询上确实零命中」是**检索层**的事，不在这里。
+    monkeypatch.setattr(service, "search_provisions", _pinned_search([]))
     user = await make_user("reader")
     principal = Principal(
         organization_id=user.organization_id, user_id=user.id, roles=frozenset({"reader"})

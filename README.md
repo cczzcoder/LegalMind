@@ -116,6 +116,10 @@ cd legalmind
 docker compose -f compose.yaml -f compose.localdb.yaml up -d postgres
 
 cd backend
+python -m venv .venv                                                   # 首次
+.venv/Scripts/python.exe -m pip install -r requirements.lock           # 依赖走锁文件（见 CONTRIBUTING）
+.venv/Scripts/python.exe -m pip install --no-deps -e .                 # 再装项目本体
+
 set -a && . ../.env && set +a          # ⚠️ .env 是 CRLF，必要时先 tr -d '\r'
 export DATABASE_URL="postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}"
 
@@ -147,6 +151,16 @@ python -m pytest
 # 前端
 cd legalmind/frontend
 npm run lint && npm run format:check && npm run build
+
+# 提交前门禁（跑的就是上面这几条，只对改动的文件）
+.venv/Scripts/pre-commit install        # 首次，在 legalmind/backend 下
+pre-commit run --all-files
+```
+
+改过界面布局，再跑一次前端验收（需要活的后端与 vite，**不在 CI 里**）：
+
+```bash
+cd legalmind/frontend && npm run acceptance
 ```
 
 集成测试连接独立的 `legalmind_test` 库，未设置 `TEST_DATABASE_URL` 时自动跳过：
@@ -224,7 +238,7 @@ CI（`.github/workflows/ci.yml`）在 push 与 PR 上跑同一套门禁：后端
 
 - **脱敏只覆盖正则可识别的身份证号、案号、联系方式**；姓名类实体需 NER，就位前不得把解析产物作为对外发布内容。
 - **审计表暂无数据库级防篡改权限**；Outbox 只写不消费。
-- 依赖用范围约束，**尚未生成锁文件**。
+- 可选的 `embeddings` extra（torch / sentence-transformers）**不在锁文件里**——体积以 GB 计，只在跑向量通路时才装。
 
 ---
 

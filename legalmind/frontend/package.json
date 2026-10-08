@@ -8,7 +8,8 @@
     "build": "tsc --noEmit && vite build",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "acceptance": "node scripts/acceptance.mjs"
   },
   "dependencies": {
     "@ant-design/icons": "^5.6.1",
@@ -27,6 +28,7 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.7",
     "globals": "^17.13.0",
+    "playwright-core": "^1.64.0",
     "prettier": "^3.9.9",
     "typescript": "^5.6.0",
     "typescript-eslint": "^8.71.0",

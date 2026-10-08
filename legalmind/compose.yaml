@@ -16,7 +16,11 @@ services:
   postgres:
     # 带 pgvector 的官方镜像：原生 postgres:17 不带 vector 扩展，而设计 §14.1 的常驻服务清单
     # 写的就是「PostgreSQL（含后续 pgvector）」，所以换镜像属于既定基线，不是新增组件。
-    image: pgvector/pgvector:pg17
+    # ⚠️ **摘要（digest）固定住**：`pg17` 这类 tag 是可变的，上游一重建镜像，本地与 CI 就跑在
+    # 不同的字节上了。升级时在本机 pull 后取新摘要替换即可：
+    #   docker image inspect <image> --format '{{index .RepoDigests 0}}'
+    # ⚠️ 摘要取自 **linux/amd64**（第一阶段开发基线，见设计 §14）；换 arm64 机器要重新取。
+    image: pgvector/pgvector:pg17@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?required}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
@@ -35,7 +39,8 @@ services:
   redis:
     # 短期内容缓存（设计 §9.3 第三层、§14.1）。**只作 TTL 键值存储，不作队列**——
     # 队列用自研 worker（FOR UPDATE SKIP LOCKED 原子领取 + 租约），**Celery 仍不引入**。
-    image: redis:7-alpine
+    # 摘要固定，理由与取法同 postgres
+    image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
     # ⚠️ **关掉全部持久化**：缓存里是「跑过脱敏的回答」，要求「过期即焚」。
     # 开了 RDB/AOF 就会落盘、进而进备份，那就等于变相落库了。
     command:

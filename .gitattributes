@@ -4,6 +4,10 @@
 # 仓库里原先那份是 CRLF，于是每次 `npm install` 都会把整个文件翻一遍
 # （4237 行假增删，见 V1.29）。钉住之后 diff 只反映真实的依赖变化。
 #
+# `requirements.lock` 同理：它是 `pip-compile` 生成的，Windows 上写 CRLF、Linux 上写 LF，
+# 不钉住的话「在另一台机器上重新生成一次」就会把整个文件翻一遍。
+#
 # 其余文件不动：`frontend/` 的源码由 Prettier 管（`.prettierrc.json` 里 `endOfLine: crlf`），
 # `doc/` 下的文档是混合行尾（历史原因），强制统一会产生大量无意义 diff。
 package-lock.json text eol=lf
+legalmind/backend/requirements.lock text eol=lf

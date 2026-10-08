@@ -55,10 +55,10 @@
 | 项 | 作用 | 备注 |
 | --- | --- | --- |
 | CI（GitHub Actions） | 每个 PR 自动跑 lint + 测试 | **已引入**（`.github/workflows/ci.yml`，push/PR 触发；后端另跑 `alembic check`） |
-| pre-commit | 提交前自动 lint / format | 依赖 n2 先定格式基线 |
-| 依赖锁定 | 生成锁文件、固定镜像摘要 | README 已列为待办 |
+| pre-commit | 提交前自动 lint / format | **已引入**（`.pre-commit-config.yaml`）：跑的就是 CI 那几条命令。⚠️ **全是 local hook**——本机直连 GitHub 不通，远程 hook 会卡在 clone 上 |
+| 依赖锁定 | 生成锁文件、固定镜像摘要 | **已做**：`backend/requirements.lock`（pip-compile 生成，CI 从它装依赖）+ `compose.yaml` 的 postgres / redis 固定 `sha256` 摘要。⚠️ 可选的 `embeddings` extra 不在锁里（体积以 GB 计） |
 
-CI 运行环境：已按 GitHub 托管 runner + 默认 PyPI/npm 源配置；若改用国内自建 runner，按 `ci.yml` 顶部注释改镜像。其余两项引入前仍需确认。
+CI 运行环境：已按 GitHub 托管 runner + 默认 PyPI/npm 源配置；若改用国内自建 runner，按 `ci.yml` 顶部注释改镜像。**本组四项已全部落地。**
 
 ---
 
@@ -69,6 +69,6 @@ CI 运行环境：已按 GitHub 托管 runner + 默认 PyPI/npm 源配置；若�
 | 一、随手可修 | 0 | 已全部修复（89a82df），原 7 项约 20 行 |
 | 二、需一次决策 | 1 | n1、n2、m2、n3 已完成；余类型生成（m7） |
 | 三、P5 功能补齐 | 0 | M3 已修（V1.15，**前端入口未做**）、m9 已修（迁移 0016） |
-| 四、基础设施 | 2 | CI 已引入；余 pre-commit、依赖锁定 |
+| 四、基础设施 | 0 | CI、pre-commit、依赖锁定（含镜像摘要）均已引入 |
 
 **已关闭（不在本清单）**：B1、M1、M2、M4、M5、M6、合规缺口 —— 见 `CODE_REVIEW_BASELINE.md`。

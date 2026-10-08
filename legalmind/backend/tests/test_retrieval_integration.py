@@ -4,6 +4,7 @@
 ``effective_on`` 只排除能证明不在效期内的版本、受限原件需授权、条号解析失败返回空而不是放宽条件。
 """
 
+from random import uniform
 from uuid import uuid4
 
 import pytest
@@ -528,7 +529,11 @@ async def test_semantic_falls_back_to_the_vector_path(
     editor, _document_id = await _seed(
         make_client, make_user, storage, session_factory, _marked_law(name, marker), f"{name}.txt"
     )
-    fixed = [0.1] * 1024
+    # ⚠️ **向量必须每次不同**：测试库跨运行累积，若每次都塞同一个固定向量，攒够 top-k 之后
+    # 新加的那条就挤不进结果——这条测试会**随时间推移自己变红**（实测跑到第 22 次时翻车，
+    # 与代码改动无关）。做法：第一个维度取一个**远离 0.1** 的随机值，于是「本条 vs 旧条」的
+    # 余弦相似度明显不同，本条稳居第一；查询向量就是本条向量，相似度 1.0。
+    fixed = [round(uniform(0.9, 1.0), 6), *([0.1] * 1023)]
     monkeypatch.setattr(embedding, "encode", lambda *_args, **_kwargs: [fixed])
     async with session_factory() as session:
         provision = await session.scalar(

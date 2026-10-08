@@ -1,7 +1,7 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,11 +16,19 @@ from app.core.security import (
     mfa_status,
 )
 from app.models import AuthSession, User
-from app.modules.authorization.service import USER_MANAGE, permissions_for, require_permission
+from app.modules.authorization.service import (
+    DOCUMENT_GRANT,
+    USER_MANAGE,
+    WIKI_GRANT,
+    AuthorizationService,
+    permissions_for,
+    require_permission,
+)
 from app.modules.identity import mfa, service
 from app.modules.identity.schemas import (
     CreateUser,
     CurrentUser,
+    DirectoryEntry,
     LoginRequest,
     MfaCode,
     MfaEnrollment,
@@ -35,6 +43,23 @@ SessionDep = Annotated[AsyncSession, Depends(get_session)]
 # 只要求已登录：第二因素未完成时也能退出、查看状态和完成 MFA
 LoggedInDep = Annotated[Principal, Depends(get_session_principal)]
 AdminDep = Annotated[Principal, Depends(require_permission(USER_MANAGE))]
+
+#: 能列「可授权对象」的权限：**授权人**就该看得到这份名单，不必是用户管理员。
+GRANT_PERMISSIONS = (DOCUMENT_GRANT, WIKI_GRANT)
+
+
+async def _grantor(principal: Annotated[Principal, Depends(get_session_principal)]) -> Principal:
+    """任一「可授权」权限即可。
+
+    `document.grant` 与 `wiki.grant` 是两件事，但**挑人的需求一样**——两处各开一个名单接口
+    只会让「谁能被授权」出现两种口径。`require_permission` 只收单个权限，所以这里手写。
+    """
+    if not any(AuthorizationService.can(principal, permission) for permission in GRANT_PERMISSIONS):
+        raise HTTPException(status_code=403, detail="Permission denied")
+    return principal
+
+
+GrantorDep = Annotated[Principal, Depends(_grantor)]
 
 
 @router.post("/auth/login", response_model=CurrentUser)
@@ -106,6 +131,27 @@ async def mfa_confirm(data: MfaCode, session: SessionDep, principal: LoggedInDep
 @router.post("/auth/mfa/verify", status_code=204)
 async def mfa_verify(data: MfaCode, session: SessionDep, principal: LoggedInDep):
     await mfa.verify(session, principal, data.code)
+
+
+@router.get("/users/directory", response_model=list[DirectoryEntry])
+async def list_directory(session: SessionDep, principal: GrantorDep):
+    """**可授权对象名单**（需求第 3 节「授权管理」）——授权人挑人用的最小信息。
+
+    ⚠️ **为什么不能直接用 `GET /users`**：那个要 `user.manage`，只有 `system_admin` 有；
+    而 `document.grant` / `wiki.grant` 在 `knowledge_admin` 手里——**有授权权的人列不出用户，
+    就只能靠粘贴 UUID 发授权**，那等于把授权这件事挡在了门外。这里补的正是这一段。
+
+    ⚠️ **刻意的窄**：只有 id / 用户名 / 是否启用，不含角色与 MFA 状态；范围限本组织（§21）。
+    ⚠️ **`is_active` 要给**：给一个已停用的人发授权是白费功夫，名单上得看得出来。
+    """
+    return [
+        DirectoryEntry(id=user.id, username=user.username, is_active=user.is_active)
+        for user in await session.scalars(
+            select(User)
+            .where(User.organization_id == principal.organization_id)
+            .order_by(User.username)
+        )
+    ]
 
 
 @router.get("/users", response_model=list[UserOut])

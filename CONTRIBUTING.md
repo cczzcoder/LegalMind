@@ -29,6 +29,15 @@ Lint 与格式化使用 ruff（配置见 `backend/pyproject.toml`）：`ruff che
 
 改动界面布局后另跑一次**前端验收**：`npm run acceptance`（`frontend/scripts/acceptance.mjs`，用 `playwright-core` + 本机 Chrome，不下载 Chromium）。它需要活的后端与 vite，所以**不在 CI 里**——先起服务（vite 记得带 `VITE_API_TARGET=http://127.0.0.1:8000`，否则代理连不上 `api` 服务名、登录页点了没反应），再用免 MFA 的账号跑。断言横向溢出、导航形态、触控目标 ≥ 44×44（窄屏）与失败请求，规格见 `doc/前端界面说明.md` §4、§8.1。
 
+### 本机环境的一个必备项：`MFA_ENCRYPTION_KEY`
+
+`.env` 里**必须有** `MFA_ENCRYPTION_KEY`，否则 `knowledge_admin` / `system_admin` **一律登不进界面**
+（`/auth/mfa/enroll` 返回 503，登录卡在第二步）。生成方式见 `.env.example`。
+
+⚠️ 界面验收默认用的 `legal_reviewer` 等角色**免 MFA**，所以这个缺失平时看不出来——但
+**「来源登记」「可见范围与授权」这类只有 `knowledge_admin` 看得到的界面就没法验**。
+⚠️ **换密钥会让已绑定的 TOTP 失效**，要逐个 `python -m app.cli reset-mfa`。
+
 ### 提交前门禁（pre-commit）
 
 配置在仓库根的 `.pre-commit-config.yaml`。**全部是 local hook**——本机直连 GitHub 不通，远程 hook 会卡在 clone 上。装一次即可：

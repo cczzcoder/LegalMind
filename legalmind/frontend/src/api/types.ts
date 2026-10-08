@@ -195,6 +195,36 @@ export type SourceRecord = {
   created_at: string;
 };
 
+/** 来源登记的出入参（`POST /sources`、`PUT /sources/{id}`）。**授权说明必填**（§20.3）。 */
+export type SourceInput = {
+  name: string;
+  source_type: SourceType;
+  trust_level: TrustLevel;
+  url: string | null;
+  publisher: string | null;
+  license_note: string;
+};
+
+/** 一条授权（`GET /documents/{id}/grants`）。 */
+export type GrantRecord = {
+  user_id: string;
+  granted_by: string;
+  created_at: string;
+};
+
+/**
+ * 可授权对象名单里的一条（`GET /users/directory`）。
+ *
+ * ⚠️ **刻意的窄**：只有 id / 用户名 / 是否启用——后端不给角色与 MFA 状态。
+ * ⚠️ 为什么不能用 `GET /users`：那个要 `user.manage`（只有 `system_admin` 有），
+ * 而 `document.grant` 在 `knowledge_admin` 手里——**有授权权的人本来列不出用户**。
+ */
+export type DirectoryEntry = {
+  id: string;
+  username: string;
+  is_active: boolean;
+};
+
 /** 原件。**这是不可变的登记记录**，不是解析产物（设计 §5.3）。 */
 export type DocumentRecord = {
   id: string;

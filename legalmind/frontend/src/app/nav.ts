@@ -24,6 +24,12 @@ export type NavItem = {
 export const PERMISSIONS = {
   documentRead: "document.read",
   documentWrite: "document.write",
+  /** 取走原件。⚠️ **与 `document.read` 分开**：看得见清单不等于能下载（审计人员就没有这一项）。 */
+  documentDownload: "document.download",
+  /** 授权名单与可见范围。 */
+  documentGrant: "document.grant",
+  /** 来源登记与编辑（含授权说明）。 */
+  sourceManage: "source.manage",
   wikiRead: "wiki.read",
   wikiWrite: "wiki.write",
   reviewDecide: "review.decide",
@@ -85,7 +91,9 @@ export const NAV: NavItem[] = [
     icon: "folder",
     // 看得见列表只要 `document.read`；**上传按钮**另按 `document.write` 判（见页面内注释）
     permission: PERMISSIONS.documentRead,
-    hint: "登记原件并查看解析进度。导入的是**原件**，解析产物与版本树由后台流水线生成。",
+    // ⚠️ `hint` 是**纯字符串**（`nav.ts` 不是 .tsx，写不了 JSX），所以这里**不能用 markdown 的
+    // `**` 强调**——它会被原样渲染到页头副标题上。要强调就改 `NavItem.hint` 的类型。
+    hint: "登记原件并查看解析进度。导入的是原件，解析产物与版本树由后台流水线生成。",
   },
 ];
 

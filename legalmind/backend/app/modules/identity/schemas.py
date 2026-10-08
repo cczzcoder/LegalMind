@@ -42,6 +42,19 @@ class UserOut(BaseModel):
     mfa_enabled: bool
 
 
+class DirectoryEntry(BaseModel):
+    """**可授权对象名单**里的一条——授权人挑人用的**最小**信息。
+
+    ⚠️ **刻意窄**：只有 id / 用户名 / 是否启用。**不含角色、MFA 状态、组织 id**——
+    授权人要回答的是「把这条资料的访问权给谁」，不是「组织里都有谁、各自什么权限」。
+    要看全量用户走 `GET /users`（需 `user.manage`）。
+    """
+
+    id: UUID
+    username: str
+    is_active: bool
+
+
 class CurrentUser(UserOut):
     csrf_token: str
     #: 当前角色对应的**权限集合**（并集）。前端用它决定菜单与按钮是否渲染；

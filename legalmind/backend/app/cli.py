@@ -67,6 +67,7 @@ from app.modules.identity import mfa, service
 from app.modules.identity.schemas import CreateUser
 from app.modules.legal_corpus import graph as legal_corpus_graph
 from app.modules.legal_corpus import relink as legal_corpus_relink
+from app.modules.legal_corpus import review as legal_corpus_review
 from app.modules.sources import service as sources_service
 from app.modules.sources.schemas import CreateSource, UpdateSource
 from app.modules.wiki import staleness as wiki_staleness
@@ -576,6 +577,62 @@ async def relink_versions_command(
         print("  这是预演，未改动任何数据；确认后去掉 --dry-run 再执行。")
 
 
+async def pending_versions_command(username: str, limit: int) -> None:
+    """列出待人工复核的法律版本（需求第 3 节「法律审核员：审核资料版本」）；需 review.decide。
+
+    ⚠️ 只读，但**仍要权限**：待审队列本身就是「哪些数据还没被人确认」的清单——与 Wiki 待审队列
+    同一条口径（设计 §7）。
+    """
+    async with SessionFactory() as session:
+        try:
+            async with session.begin():
+                await cli_principal(session, username, REVIEW_DECIDE)
+                rows = await legal_corpus_review.pending_versions(session, limit=limit)
+        except HTTPException as error:
+            sys.exit(f"{error.status_code}: {error.detail}")
+        finally:
+            await engine.dispose()
+
+    if not rows:
+        print("没有待复核的法律版本。")
+        return
+    print(f"待复核 {len(rows)} 个法律版本（最近导入的在前）：")
+    for version, title, filename in rows:
+        print(f"  - {title} / {version.version_label}")
+        print(f"      --version {version.id}")
+        print(f"      原件：{filename or '（未挂原件）'}　效力状态：{version.legal_status}")
+
+
+async def review_version_command(
+    username: str, version_id: str, decision: str, note: str | None
+) -> None:
+    """人工复核一个法律版本（需求第 3 节）；需 review.decide，操作写审计。
+
+    ⚠️ **只改 `review_status`，绝不动 `legal_status`**——后者是法律事实（由正文前言的主席令与
+    「自…起施行」推出），不是审核意见；把「已废止」点成「现行有效」正是本系统要防的事。
+    ⚠️ **允许改已复核的版本**（与 `review-run` 刻意不同）：问答运行是**历史记录**，复核一次就定了；
+    而 `review_status` 是**当前状态**，审错了必须能纠正——否则只是把「只能改 SQL」换个地方再来一遍。
+    """
+    async with SessionFactory() as session:
+        try:
+            async with session.begin():
+                principal = await cli_principal(session, username, REVIEW_DECIDE)
+                version = await legal_corpus_review.review_version(
+                    session, principal, UUID(version_id), decision=decision, note=note
+                )
+        except HTTPException as error:
+            sys.exit(f"{error.status_code}: {error.detail}")
+        except (LookupError, ValueError) as error:
+            sys.exit(str(error))
+        finally:
+            await engine.dispose()
+
+    print(f"已复核：{version.version_label} → {version.review_status}（版本 id {version.id}）")
+    print(f"效力状态 {version.legal_status}——**未改动**（复核只动审核状态）")
+    if note:
+        print(f"备注：{note}")
+
+
 async def import_documents(
     username: str,
     source_id: UUID,
@@ -1060,6 +1117,35 @@ def main() -> None:
     review_run.add_argument("--run", required=True, help="运行记录 id")
     review_run.add_argument("--note", default=None, help="复核备注")
 
+    pending_versions = commands.add_parser(
+        "pending-versions", help="列出待人工复核的法律版本（需求第 3 节「审核资料版本」）"
+    )
+    pending_versions.add_argument("--as", dest="actor", required=True, help="执行操作的用户名")
+    pending_versions.add_argument("--limit", type=int, default=20, help="最多列出多少条（默认 20）")
+
+    review_version = commands.add_parser(
+        "review-version",
+        help="人工复核一个法律版本；只改审核状态，不动效力状态（需求第 3 节）",
+    )
+    review_version.add_argument("--as", dest="actor", required=True, help="执行操作的用户名")
+    review_version.add_argument("--version", required=True, help="法律版本 id")
+    decision = review_version.add_mutually_exclusive_group(required=True)
+    decision.add_argument(
+        "--approve",
+        dest="decision",
+        action="store_const",
+        const="approved",
+        help="确认该版本的元数据可用",
+    )
+    decision.add_argument(
+        "--reject",
+        dest="decision",
+        action="store_const",
+        const="rejected",
+        help="驳回该版本的元数据",
+    )
+    review_version.add_argument("--note", default=None, help="复核备注")
+
     worker = commands.add_parser(
         "run-worker", help="按需启动单进程 worker，领取并处理后台任务（设计 12.2）"
     )
@@ -1184,6 +1270,14 @@ def main() -> None:
 
     if args.command == "review-run":
         asyncio.run(review_run_command(args.actor, args.run, args.note))
+        return
+
+    if args.command == "pending-versions":
+        asyncio.run(pending_versions_command(args.actor, args.limit))
+        return
+
+    if args.command == "review-version":
+        asyncio.run(review_version_command(args.actor, args.version, args.decision, args.note))
         return
 
     if args.command == "flag-stale-pages":

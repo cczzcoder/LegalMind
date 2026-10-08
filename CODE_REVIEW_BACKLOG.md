@@ -43,7 +43,7 @@
 
 | 编号 | 位置 | 影响 | 建议改法 | 改动面 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| **M3** | `authorization/service.py:29-38` | `auditor` 权限集为**空**、`legal_reviewer` 仅只读；需求 §3 要求的"审计人员查看审计与追溯记录""法律审核员审核资料版本、Wiki 与待审回答"均不可用（README 已如实声明未实现） | 新增 `audit.read` / `review.decide` 权限常量、对应接口与前端入口；与 P5 的 Wiki 审核发布一起设计 | 大（权限 + 接口 + 前端 + 迁移） | **已修**（V1.15）：新增 `review.decide`（`legal_reviewer` / `knowledge_admin`）与 `audit.read`，`auditor` 补上只读 + `audit.read`（**不含原件下载**）；Wiki 审核发布与待审队列接口已落地。**前端入口仍未做**（前端目前只有骨架） |
+| **M3** | `authorization/service.py:29-38` | `auditor` 权限集为**空**、`legal_reviewer` 仅只读；需求 §3 要求的"审计人员查看审计与追溯记录""法律审核员审核资料版本、Wiki 与待审回答"均不可用（README 已如实声明未实现） | 新增 `audit.read` / `review.decide` 权限常量、对应接口与前端入口；与 P5 的 Wiki 审核发布一起设计 | 大（权限 + 接口 + 前端 + 迁移） | **已修**（V1.15）：新增 `review.decide`（`legal_reviewer` / `knowledge_admin`）与 `audit.read`，`auditor` 补上只读 + `audit.read`（**不含原件下载**）；Wiki 审核发布与待审队列接口已落地。**前端入口仍未做**（前端目前只有骨架）。⚠️ **「审核资料版本」这一条当时并未一并补上**（V1.42 才补）：`legal_versions.review_status` 只有自动写入，低置信度置 `pending` 之后**没有任何路径能改**，只能连库改 SQL；现已加 CLI `pending-versions` / `review-version`（需 `review.decide`、写审计），**界面仍未做** |
 | m9 | `models.py:67-70` | `ck_wiki_draft_only` 把"仅草稿"固化为数据库约束，P5 实现发布时必须迁移移除 | 在代码注释与设计文档中标注该约束的移除计划 | 注释 | **已修**（V1.15，迁移 0016）：移除该约束，改为 `ck_wiki_revision_status` 限定四态；回滚时会先把非草稿修订改回 `draft` |
 
 ---

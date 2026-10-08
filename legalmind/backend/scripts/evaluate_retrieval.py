@@ -321,9 +321,11 @@ def _hybrid_retriever(parts: list[Retriever], *, depth: int, rrf_k: int) -> Retr
 def _cascade_retriever(primary: Retriever, fallback: Retriever) -> Retriever:
     """关键词（含改写）优先，**命中为空才走向量**。
 
-    依据是实测：关键词命中时准确率 1.000，而向量通路永远返回 top-k、必然夹带无关条文
-    （词面集上准确率 0.074）。盲目 RRF 融合等于把这份噪声加到关键词上（准确率 1.000 → 0.076），
-    所以这里改成「先精确、空了再兜底语义」——两边各自的强项都不受损。
+    依据是实测：关键词通路只返回精确命中的少数条文（词面集上平均 1.5 条/查询、全部命中），
+    而向量通路永远填满 top-k、必然夹带无关条文（同一份金标准上平均 50 条/查询）。
+    ⚠️ 两者的**召回与排序其实一样**（Recall / Rank@1 / MRR 都是 1.000）——差别只在
+    **交出去的候选集合大小**，而下游的证据预算是按字符估的、装不下就从前面截断。
+    所以这里改成「先精确、空了再兜底语义」：不把几十条噪声候选喂进证据预算。
     """
 
     async def search(session, principal, query: str, top_k: int) -> list[Pair]:
@@ -399,16 +401,25 @@ def _build_retrievers(
     return retrievers, query_vectors
 
 
+# 固定 k 的精确率。⚠️ 汇总里的 `precision` 分母是「返回条数」，它随 top-k 漂移——
+# 同一个方法在 top-k=20 / 60 下会给出 0.076 / 0.035 两个数（见 doc/技术决策与踩坑记录.md §1.7）。
+# 那个数度量的是**候选集合大小**，不是排序质量；要横向比必须钉住 k。
+FIXED_KS = (5, 10)
+
+
 def _score(hits: list[Pair], expect: set[Pair], top_k: int) -> dict:
     limited = hits[:top_k]
     found = [hit for hit in limited if hit in expect]
     rank = next((index + 1 for index, hit in enumerate(limited) if hit in expect), None)
-    return {
+    score = {
         "found": len(found),
         "rank": rank,
         "recall": (len(found) / len(expect)) if expect else None,
         "reciprocal_rank": (1.0 / rank) if rank else 0.0,
     }
+    for k in FIXED_KS:
+        score[f"found_at_{k}"] = sum(1 for hit in hits[:k] if hit in expect)
+    return score
 
 
 def _summarise(retriever: Retriever, per_query: list[dict], top_k: int) -> dict:
@@ -416,6 +427,13 @@ def _summarise(retriever: Retriever, per_query: list[dict], top_k: int) -> dict:
     total_expect = sum(len(row["expect"]) for row in scored)
     total_found = sum(row["found"] for row in scored)
     total_hits = sum(len(row["hits"]) for row in scored)
+    # 精确率@k：分母取「实际交出去的前 k 条」而不是常数 k。关键词通路常常只返回 1~2 条且
+    # 全对，用常数 k 作分母会把「只返回正确答案」算成低精度；这样定义才可比。
+    precision_at: dict[str, float | None] = {}
+    for k in FIXED_KS:
+        found_k = sum(row[f"found_at_{k}"] for row in scored)
+        returned_k = sum(min(len(row["hits"]), k) for row in scored)
+        precision_at[f"precision_at_{k}"] = round(found_k / returned_k, 4) if returned_k else None
     return {
         "retriever": retriever.name,
         "summary": retriever.summary,
@@ -423,6 +441,7 @@ def _summarise(retriever: Retriever, per_query: list[dict], top_k: int) -> dict:
         "queries": len(per_query),
         "recall": round(total_found / total_expect, 4) if total_expect else 0.0,
         "precision": round(total_found / total_hits, 4) if total_hits else None,
+        **precision_at,
         "recall_at_1": round(
             sum(row["recall"] for row in scored if row["rank"] == 1) / len(scored)
             if scored
@@ -462,7 +481,13 @@ async def evaluate(
                     error = None
                 except Exception as failure:  # noqa: BLE001 - 候选失败要如实记下，不能让整轮中断
                     hits, elapsed_ms, error = [], 0.0, f"{type(failure).__name__}: {failure}"
-                    score = {"found": 0, "rank": None, "recall": None, "reciprocal_rank": 0.0}
+                    score = {
+                        "found": 0,
+                        "rank": None,
+                        "recall": None,
+                        "reciprocal_rank": 0.0,
+                        **{f"found_at_{k}": 0 for k in FIXED_KS},
+                    }
                 per_query.append(
                     {
                         "id": item["id"],
@@ -488,17 +513,26 @@ def _markdown(summaries: list[dict], details: dict[str, list[dict]], top_k: int)
         f"生成时间：{now}　top-k：{top_k}",
         "",
         "期望集 = 全库中「去空白文本」包含全部 terms 的（法, 条）；衡量**词面命中**，不是语义召回。",
+        "⚠️ 期望集由「去空白 + 全部词命中」推导，**与关键词通路的判据同源**——关键词通路在这份金标准上是主场成绩，不能直接拿来给向量/融合方案下结论。",
         "",
         "## 汇总",
         "",
-        "| 通路 | Recall | 准确率 | Rank@1 | MRR | 无命中查询误报 | 错误 | 平均耗时 ms |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| 通路 | Recall | 精确率@5 | 精确率@10 | 精确率(全量) | Rank@1 | MRR | 无命中查询误报 | 错误 | 平均耗时 ms |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for row in summaries:
         out.append(
-            f"| `{row['retriever']}` | {row['recall']} | {row['precision']} | {row['recall_at_1']} | "
+            f"| `{row['retriever']}` | {row['recall']} | {row['precision_at_5']} | "
+            f"{row['precision_at_10']} | {row['precision']} | {row['recall_at_1']} | "
             f"{row['mrr']} | {row['no_hit_false_positives']} | {row['errors']} | {row['avg_ms']} |"
         )
+    out += [
+        "",
+        (
+            "精确率@k = top-k 内的命中数 / **实际交出去的前 k 条数**（分母封顶到 k）。"
+            "**精确率(全量) 的分母是「返回条数」，会随 top-k 漂移，只作诊断项**——横向比只看 @5 与 @10。"
+        ),
+    ]
     out += ["", "## 通路说明", ""]
     for row in summaries:
         out.append(f"- `{row['retriever']}`：{row['summary']}")
@@ -565,12 +599,16 @@ async def run(args) -> int:
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     md_path.write_text(_markdown(summaries, details, args.top_k), encoding="utf-8")
 
-    header = f"{'通路':<44}{'Recall':>8}{'准确率':>8}{'Rank@1':>9}{'MRR':>8}{'误报':>6}{'ms':>8}"
+    header = (
+        f"{'通路':<44}{'Recall':>8}{'P@5':>7}{'P@10':>7}{'P(全量)':>9}"
+        f"{'Rank@1':>9}{'MRR':>8}{'误报':>6}{'ms':>8}"
+    )
     print(header)
     print("-" * len(header))
     for row in summaries:
         print(
-            f"{row['retriever']:<44}{row['recall']:>8}{row['precision']!s:>8}"
+            f"{row['retriever']:<44}{row['recall']:>8}{row['precision_at_5']!s:>7}"
+            f"{row['precision_at_10']!s:>7}{row['precision']!s:>9}"
             f"{row['recall_at_1']:>9}{row['mrr']:>8}"
             f"{row['no_hit_false_positives']:>6}{row['avg_ms']:>8}"
         )

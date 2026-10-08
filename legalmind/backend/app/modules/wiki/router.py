@@ -23,6 +23,7 @@ from app.modules.wiki.schemas import (
     CreateRevision,
     GrantOut,
     PageOut,
+    PendingRevisionOut,
     ReviewDecision,
     RevisionOut,
     SetAccessScope,
@@ -229,10 +230,17 @@ async def reject_revision(
     return await service.reject_revision(session, principal, page_id, revision_number, data.note)
 
 
-@router.get("/revisions/pending", response_model=list[RevisionOut])
+@router.get("/revisions/pending", response_model=list[PendingRevisionOut])
 async def list_pending(session: SessionDep, principal: ReviewerDep):
-    """待审队列——此前只能靠 SQL 查。"""
-    return await service.list_pending(session, principal)
+    """待审队列——此前只能靠 SQL 查。
+
+    ⚠️ 返回里带 **`page_title`**：这是跨页面的清单，只给 `page_id` 的话审核人得拿 UUID 去别处对。
+    """
+    rows = await service.list_pending(session, principal)
+    return [
+        PendingRevisionOut(**RevisionOut.model_validate(revision).model_dump(), page_title=title)
+        for revision, title in rows
+    ]
 
 
 @router.get("/pages/{page_id}/published", response_model=RevisionOut)

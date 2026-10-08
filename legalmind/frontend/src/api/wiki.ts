@@ -1,5 +1,11 @@
 import { api } from "./client";
-import type { AccessScope, WikiCitation, WikiPage, WikiRevision } from "./types";
+import type {
+  AccessScope,
+  PendingWikiRevision,
+  WikiCitation,
+  WikiPage,
+  WikiRevision,
+} from "./types";
 
 export function listPages(limit = 100) {
   return api<WikiPage[]>(`/wiki/pages?limit=${limit}`);
@@ -47,9 +53,17 @@ export function submitRevision(pageId: string, revisionNumber: number) {
   });
 }
 
-export function publishRevision(pageId: string, revisionNumber: number) {
+/**
+ * 审核通过并发布。
+ *
+ * ⚠️ **必须带请求体**：后端是 `data: ReviewDecision`（**必填**，`note` 才是可选的）。
+ * 此前这里一个 body 都不发，界面上点「发布」**必然 422**——`tests/test_wiki_review.py`
+ * 的 `test_publish_over_http_requires_a_body` 钉住这条契约。
+ */
+export function publishRevision(pageId: string, revisionNumber: number, note: string | null) {
   return api<WikiRevision>(`/wiki/pages/${pageId}/revisions/${revisionNumber}/publish`, {
     method: "POST",
+    body: JSON.stringify({ note }),
   });
 }
 
@@ -61,10 +75,9 @@ export function rejectRevision(pageId: string, revisionNumber: number, note: str
   });
 }
 
+/** 待审队列（设计 §10.2）：跨页面的清单，**每条都带 `page_title`**。 */
 export function listPending(limit = 100) {
-  return api<{ page_id: string; revision_number: number; title: string }[]>(
-    `/wiki/revisions/pending?limit=${limit}`,
-  );
+  return api<PendingWikiRevision[]>(`/wiki/revisions/pending?limit=${limit}`);
 }
 
 /** 待复核标记：引用的依据被取代或正文变了（设计 §10.2）。 */

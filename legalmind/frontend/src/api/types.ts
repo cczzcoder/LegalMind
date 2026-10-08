@@ -142,6 +142,15 @@ export type WikiRevision = {
   created_at: string;
 };
 
+/**
+ * 待审队列里的一条 Wiki 修订（与后端 `wiki/schemas.py` 的 `PendingRevisionOut` 对齐）。
+ *
+ * ⚠️ **比 `WikiRevision` 多一个 `page_title`**：队列是跨页面的清单，**只给 `page_id` 就没法用**
+ * ——审核人得拿 UUID 去别处对。此前这里手写成了 `{page_id, revision_number, title}`，
+ * **字段名全是错的**（实际是 `number`，而且后端当时根本没返回标题）；现在两边对齐。
+ */
+export type PendingWikiRevision = WikiRevision & { page_title: string };
+
 export type WikiCitation = { provision_version_id: string; created_at: string };
 
 /** SSE 事件（设计 §9.4）。`answer` **只在终态**推送；门禁未过时里面是拒答说明。 */

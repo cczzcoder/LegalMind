@@ -92,3 +92,13 @@ class RevisionOut(BaseModel):
     reviewed_at: datetime | None
     review_note: str | None
     created_at: datetime
+
+
+class PendingRevisionOut(RevisionOut):
+    """待审队列里的一条修订。
+
+    ⚠️ **比 `RevisionOut` 多一个 `page_title`**：队列是跨页面的清单，**只给 `page_id`
+    等于让人拿 UUID 去别处对**——那样的队列没有意义。标题本来就在 `list_pending` 的 join 里。
+    """
+
+    page_title: str

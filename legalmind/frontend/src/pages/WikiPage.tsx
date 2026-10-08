@@ -210,6 +210,15 @@ function WikiDetail({ pageId }: { pageId: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  /**
+   * 正在填写的审核结论。`null` = 没开弹窗。
+   *
+   * ⚠️ **驳回理由不能写死**：此前这里直接发 `"经审核未通过"`，而 `review_note` 是
+   * **给作者的理由、也是事后审计要看的东西**（后端 `ReviewDecision` 的 docstring 原话）。
+   * 发布同样要带 `note`（后端 `data: ReviewDecision` 是必填的，缺请求体会 422）。
+   */
+  const [review, setReview] = useState<"publish" | "reject" | null>(null);
+  const [reviewNote, setReviewNote] = useState("");
   const [conflict, setConflict] = useState(false);
 
   const head = revisions.status === "ready" ? (revisions.data[0] ?? null) : null;
@@ -244,6 +253,23 @@ function WikiDetail({ pageId }: { pageId: string }) {
     } finally {
       setBusy(false);
     }
+  }
+
+  /** 执行审核结论。**失败时不关弹窗**——备注不能因为一次网络抖动就丢掉。 */
+  async function submitReview() {
+    if (headNumber === null || review === null) return;
+    const decision = review;
+    await run(
+      async () => {
+        const note = reviewNote.trim() || null;
+        if (decision === "publish") await wiki.publishRevision(pageId, headNumber, note);
+        else await wiki.rejectRevision(pageId, headNumber, note);
+        setReview(null);
+        setReviewNote("");
+        await reloadAll();
+      },
+      decision === "publish" ? "已发布。" : "已驳回。",
+    );
   }
 
   const reloadAll = async () => {
@@ -497,26 +523,20 @@ function WikiDetail({ pageId }: { pageId: string }) {
                 <Button
                   type="primary"
                   loading={busy}
-                  onClick={() =>
-                    void run(async () => {
-                      if (headNumber === null) return;
-                      await wiki.publishRevision(pageId, headNumber);
-                      await reloadAll();
-                    }, "已发布。")
-                  }
+                  onClick={() => {
+                    setReviewNote("");
+                    setReview("publish");
+                  }}
                 >
                   发布
                 </Button>
                 <Button
                   danger
                   loading={busy}
-                  onClick={() =>
-                    void run(async () => {
-                      if (headNumber === null) return;
-                      await wiki.rejectRevision(pageId, headNumber, "经审核未通过");
-                      await reloadAll();
-                    }, "已驳回。")
-                  }
+                  onClick={() => {
+                    setReviewNote("");
+                    setReview("reject");
+                  }}
                 >
                   驳回
                 </Button>
@@ -562,6 +582,35 @@ function WikiDetail({ pageId }: { pageId: string }) {
           />
         </Card>
       </AsyncBoundary>
+
+      <Modal
+        open={review !== null}
+        title={review === "publish" ? "审核通过并发布" : "驳回这条修订"}
+        okText={review === "publish" ? "发布" : "驳回"}
+        okButtonProps={{ danger: review === "reject", loading: busy }}
+        cancelText="取消"
+        onOk={() => void submitReview()}
+        onCancel={() => setReview(null)}
+      >
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <Typography.Text type="secondary">
+            {review === "publish"
+              ? "发布后读者看到的就是这一版（设计 §10.2）。备注可留空。"
+              : "驳回理由会显示给作者，也会进审计——建议写清「哪里不行、怎么改」。"}
+          </Typography.Text>
+          <Input.TextArea
+            rows={3}
+            value={reviewNote}
+            onChange={(event) => setReviewNote(event.target.value)}
+            placeholder={
+              review === "publish"
+                ? "例如：与原文核对无误"
+                : "例如：引用的条款版本已失效，请换用现行版本"
+            }
+            maxLength={2000}
+          />
+        </Space>
+      </Modal>
 
       {notice && <Alert type="success" showIcon message={notice} />}
       {error && <Alert type="error" showIcon message={error} />}

@@ -438,20 +438,25 @@ async def reject_revision(
     return revision
 
 
-async def list_pending(session: AsyncSession, principal: Principal) -> list[WikiRevision]:
-    """待审队列——此前只能靠 SQL 查（README 记的缺口）。"""
+async def list_pending(
+    session: AsyncSession, principal: Principal
+) -> list[tuple[WikiRevision, str]]:
+    """待审队列——此前只能靠 SQL 查（README 记的缺口）。
+
+    返回 `(revision, page_title)`：**审核人要看到的是「哪个页面等着审」**，只给 `page_id`
+    等于让人拿 UUID 去别处对——队列本身就失去意义了。标题本来就在 join 里，顺手带出来。
+    """
     async with session.begin():
-        return list(
-            await session.scalars(
-                select(WikiRevision)
-                .join(WikiPage, WikiRevision.page_id == WikiPage.id)
-                .where(
-                    WikiRevision.status == "submitted",
-                    AuthorizationService.wiki_page_scope(principal),
-                )
-                .order_by(WikiRevision.created_at, WikiRevision.id)
+        rows = await session.execute(
+            select(WikiRevision, WikiPage.title)
+            .join(WikiPage, WikiRevision.page_id == WikiPage.id)
+            .where(
+                WikiRevision.status == "submitted",
+                AuthorizationService.wiki_page_scope(principal),
             )
+            .order_by(WikiRevision.created_at, WikiRevision.id)
         )
+        return list(rows.all())
 
 
 async def get_published_revision(

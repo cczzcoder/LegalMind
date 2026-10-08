@@ -49,7 +49,7 @@ export const NAV: NavItem[] = [
     label: "待审队列",
     icon: "review",
     permission: PERMISSIONS.reviewDecide,
-    hint: "被门禁拦下的运行在这里等人判读；复核不改变运行状态。",
+    hint: "被门禁拦下的问答运行、等着审核发布的 Wiki 修订，都在这里等人判读。",
   },
   {
     path: "/versions",

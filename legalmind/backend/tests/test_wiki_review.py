@@ -6,6 +6,7 @@
 
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import func, select
@@ -47,6 +48,30 @@ def storage(tmp_path, make_client):
     storage = LocalFileStorage(tmp_path)
     app.dependency_overrides[get_storage] = lambda: storage
     return storage
+
+
+@pytest.fixture
+def client_as(session_factory):
+    """以指定 Principal 身份访问 API（跳过登录，直接覆盖 `get_principal`）。
+
+    ⚠️ 审核发布这条链路此前**只测到服务层**，接口层的请求体契约没人管——于是
+    「后端要 `ReviewDecision`、前端一个 body 都不发」这个组合一路溜到了界面上（见下面那条回归）。
+    """
+    from app.core.database import get_session
+    from app.core.security import get_principal
+    from app.main import app
+
+    async def override_session():
+        async with session_factory() as session:
+            yield session
+
+    def make(principal: Principal) -> httpx.AsyncClient:
+        app.dependency_overrides[get_session] = override_session
+        app.dependency_overrides[get_principal] = lambda: principal
+        return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
+
+    yield make
+    app.dependency_overrides.clear()
 
 
 @pytest.fixture
@@ -125,6 +150,12 @@ async def _draft(session_factory, author: Principal, *, body: str = "初稿正�
             session, author, CreatePage(title=f"页面-{uuid4().hex[:8]}", body=body)
         )
     return revision.page_id, revision.number
+
+
+async def _page_title(session_factory, page_id) -> str:
+    """回读页面标题——`_draft` 用的是随机标题，不能把期望值写死。"""
+    async with session_factory() as session:
+        return await session.scalar(select(WikiPage.title).where(WikiPage.id == page_id))
 
 
 async def _submit_with_citation(session_factory, author, page_id, number, provision) -> None:
@@ -273,7 +304,57 @@ async def test_pending_queue_lists_submitted_revisions(
     async with session_factory() as session:
         await service.submit_revision(session, author, page_id, number)
         pending = await service.list_pending(session, reviewer)
-    assert [(item.page_id, item.number) for item in pending] == [(page_id, number)]
+    # 队列是**跨页面**的清单，所以每条都要带页面标题——只给 page_id 等于让人拿 UUID 去对
+    assert [(revision.page_id, revision.number) for revision, _title in pending] == [
+        (page_id, number)
+    ]
+    assert [title for _revision, title in pending] == [await _page_title(session_factory, page_id)]
+
+
+async def test_pending_endpoint_carries_the_page_title(session_factory, actors):
+    """接口层再钉一遍 `page_title`：队列是跨页面的清单，**只给 page_id 就没法用**。
+
+    前端原先把返回类型写成 `{page_id, revision_number, title}`——字段名全是错的（实际是
+    `number`，而且**根本没有 `title`**）。这条测试同时挡住「类型又漂回去」。
+    """
+    from app.modules.wiki.router import list_pending
+
+    author = await actors("editor")
+    reviewer = await actors("legal_reviewer")
+    page_id, number = await _draft(session_factory, author)
+
+    async with session_factory() as session:
+        await service.submit_revision(session, author, page_id, number)
+        rows = await list_pending(session=session, principal=reviewer)
+
+    assert [row.page_title for row in rows] == [await _page_title(session_factory, page_id)]
+    assert [row.number for row in rows] == [number]
+
+
+async def test_publish_over_http_requires_a_body(
+    client_as, session_factory, actors, make_client, make_user, storage
+):
+    """⚠️ **回归**：前端 `publishRevision` 曾经一个 body 都不发，于是界面上的「发布」按钮
+    点了**必然 422**（`{"type":"missing","loc":["body"]}`）——而这条链路只测到服务层，
+    接口契约没人管，bug 就这样上了线。
+
+    后端 `data: ReviewDecision` 是**必填**的：`note` 可以为空，但**请求体本身不能缺**。
+    这条测试同时钉住两件事——缺 body 就是 422，以及前端该发的形状（`{"note": ...}`）能过。
+    """
+    author = await actors("editor")
+    reviewer = await actors("legal_reviewer")
+    provision = await _provision(session_factory, make_client, make_user, storage)
+    page_id, number = await _draft(session_factory, author)
+    await _submit_with_citation(session_factory, author, page_id, number, provision)
+
+    url = f"/api/v1/wiki/pages/{page_id}/revisions/{number}/publish"
+    async with client_as(reviewer) as client:
+        without_body = await client.post(url)
+        with_body = await client.post(url, json={"note": None})
+
+    assert without_body.status_code == 422, "缺请求体应当被挡下——前端正是漏了这一步"
+    assert with_body.status_code == 200, with_body.text
+    assert with_body.json()["status"] == "published"
 
 
 async def test_unknown_revision_number_is_a_404(session_factory, actors):

@@ -151,6 +151,23 @@ try {
         await page.waitForTimeout(300);
       }
 
+      // ⚠️ **页面内的页签也要量**：只走路由会漏掉「第二个页签里的东西」。
+      // 待审队列的「Wiki 修订」就是一个页签——它曾经只有接口没有界面，正是没人走到的地方。
+      const tabs = page.locator(".ant-segmented-item");
+      const tabCount = await tabs.count();
+      for (let index = 0; index < tabCount; index += 1) {
+        await tabs.nth(index).click();
+        await page.waitForTimeout(800);
+        const inTab = await page.evaluate(COLLECT);
+        maxOverflow = Math.max(maxOverflow, inTab.overflow);
+        sawSider = Math.max(sawSider, inTab.siderWidth);
+        for (const item of inTab.clickable) if (!seen.has(item.key)) seen.set(item.key, item);
+        if (shotDir) {
+          const name = route.trim().replace(/[#/]/g, "") || "root";
+          await page.screenshot({ path: path.join(shotDir, `${width}-${name}-tab${index}.png`) });
+        }
+      }
+
       if (shotDir) {
         const name = route.trim().replace(/[#/]/g, "") || "root";
         await page.screenshot({ path: path.join(shotDir, `${width}-${name}.png`) });

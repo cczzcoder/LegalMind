@@ -38,7 +38,7 @@ from app.adapters import generation
 from app.adapters.cache import cache_key
 from app.core.config import get_settings
 from app.core.security import Principal
-from app.modules.answering import claims, clarify, runs
+from app.modules.answering import claims, clarify, runs, semantics
 from app.modules.answering.assembly import assemble_evidence
 from app.modules.answering.evidence import (
     INSTRUCTIONS,
@@ -49,6 +49,7 @@ from app.modules.answering.evidence import (
 )
 from app.modules.answering.runs import RunTracker, record_run
 from app.modules.answering.scope import DISCLAIMER, scope_notice
+from app.modules.answering.semantics import SemanticReview
 
 # ⚠️ **按名字导入，不要导入模块本身**：本文件的第一个形参就叫 `session`（`AsyncSession`），
 # 导入一个叫 `session` 的模块会被参数名遮住。
@@ -87,6 +88,11 @@ VERIFICATION_FAILED_NOTICE = (
 STRUCTURE_FAILED_NOTICE = (
     "模型没有按约定输出结构化结论（{reason}），未作为正式答案发布（设计 §9.2）。"
     "以下是模型的原始输出，请人工判读。"
+)
+# §9.3 第二层没过：**不当正式答案发布**（§9.4「正式答案通过门禁后发送」），草稿留给人工。
+SEMANTIC_FAILED_NOTICE = (
+    "结论未通过语义核验，不作为正式答案发布（设计 §9.3 第二层）。核验发现：{issues}。"
+    "以下是模型生成但未通过核验的草稿，仅供参考，请人工判读。"
 )
 
 #: 不能作为「现行依据」的效力状态（§8.3）。
@@ -154,10 +160,12 @@ class Answer:
     # ---- 门禁 ----
     #: §9.3 第一层的核验结果。没走到生成那一步时为 None。
     verification: VerificationResult | None = None
+    #: §9.3 **第二层**的语义核验结果。没走到那一步时为 None。
+    semantic: SemanticReview | None = None
     #: 核验未通过时，模型生成的原始草稿（供人工判读）。
     draft: str | None = None
-    #: 哪道门禁/环节拦下了正式结论：``"scope"`` / ``"verification"`` / ``"format"`` /
-    #: ``"clarifying"``（在等用户补充，§9.1）；None 表示没被拦。
+    #: 哪道门禁/环节拦下了正式结论：``"scope"`` / ``"verification"`` / ``"semantics"`` /
+    #: ``"format"`` / ``"clarifying"``（在等用户补充，§9.1）；None 表示没被拦。
     blocked_by: str | None = None
     #: 本次结论**实际引用**的证据编号（服务端从结构化主张里取，§9.2）。拒答或未生成时为空。
     cited_evidence_ids: tuple[str, ...] = ()
@@ -540,6 +548,48 @@ async def _answer_pipeline(
             blocked_by="verification",
         )
 
+    # §9.3 **第二层：语义校验**——第一层只能查「条号在不在证据集里」，这一层判「这条证据到底
+    # 支不支持这条主张」。见 `semantics` 的模块注释：为什么需要它、判官看得到什么、判错了怎么处置。
+    #
+    # ⚠️ 代价是**每条主张一次模型调用**——P7 的基线显示生成本来就占端到端问答的 94%，
+    # 这一层会让正式问答明显变慢，所以判官的 token 预算压到 `semantics.JUDGE_MAX_NEW_TOKENS`。
+    try:
+        review = semantics.review(
+            parsed.answer,
+            question,
+            assembly.included,
+            lambda messages, schema: generation.generate(
+                model_name,
+                messages,
+                schema=schema,
+                max_new_tokens=semantics.JUDGE_MAX_NEW_TOKENS,
+            ),
+        )
+    except generation.GenerationUnavailable:
+        # §9.4：**语义核验模型不可用时也不跳过核验**——不发布正式结论，转人工。
+        review = SemanticReview(ok=False, reviews=(), unavailable=True, reason="判官不可用")
+    if not review.ok:
+        issues = (
+            "语义核验模型不可用"
+            if review.unavailable
+            else "；".join(item.summary() for item in review.reviews if not item.supported)
+        )
+        await _advance(run, "NEEDS_REVIEW", on_state)
+        return Answer(
+            question=question,
+            answer=SEMANTIC_FAILED_NOTICE.format(issues=issues),
+            citations=citations,
+            path=search.path,
+            model=model_name,
+            seconds=perf_counter() - started,
+            status_notice=notice,
+            verification=result,
+            semantic=review,
+            draft=text,
+            evidence_notice=assembly.notice,
+            blocked_by="semantics",
+        )
+
     # `PARTIAL` = 发布了但**限定了回答范围**（§9.4「证据无法完整装配时，限制回答范围或转人工」）
     await _advance(run, "PARTIAL" if assembly.notice else "ANSWERED", on_state)
     return Answer(
@@ -551,6 +601,7 @@ async def _answer_pipeline(
         seconds=perf_counter() - started,
         status_notice=notice,
         verification=result,
+        semantic=review,
         evidence_notice=assembly.notice,
         cited_evidence_ids=parsed.answer.cited_evidence_ids,
         repaired_output=parsed.repaired,

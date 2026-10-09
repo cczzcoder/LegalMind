@@ -251,7 +251,7 @@ async def test_vague_question_records_a_clarifying_run(monkeypatch, session_fact
 
 
 async def test_continuation_merges_the_supplement_and_finishes(
-    monkeypatch, session_factory, make_user
+    monkeypatch, session_factory, make_user, semantics_pass
 ):
     """**闭环**：澄清 → 补充 → 同一个运行走到 `ANSWERED`（§9.1 的 `CLARIFYING → RETRIEVING`）。"""
     monkeypatch.setattr(service.generation, "available", lambda *_a, **_k: True)

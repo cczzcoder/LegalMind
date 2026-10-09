@@ -245,9 +245,11 @@ async def measure_retrieval(principal: Principal, queries: list[str], repeat: in
 
 async def measure_answering(principal: Principal, questions: list[str]) -> dict:
     """端到端问答分段计时（§9.4）。`record=False`：不落库、不写审计。"""
-    stages: dict[str, Timing] = {
-        name: Timing(name) for name in ("retrieve", "assemble", "generate")
-    }
+    # ⚠️ `verify` 这一段**必须单列**：第二层语义核验（V1.48 起接入）是**每条主张一次模型调用**，
+    # 挂在 `VERIFYING` 状态里。不单列的话它的耗时会全被算进「生成」——实测差点把这一层的代价看漏
+    # （「生成」7.2 s → 34.5 s，其实是生成 + 判官混在一起）。
+    stage_names = ("retrieve", "assemble", "generate", "verify")
+    stages: dict[str, Timing] = {name: Timing(name) for name in stage_names}
     total = Timing("total")
     outcomes: list[dict] = []
 
@@ -266,7 +268,7 @@ async def measure_answering(principal: Principal, questions: list[str]) -> dict:
             )
         total.add(time.perf_counter() - started)
 
-        order = ["retrieve", "assemble", "generate"]
+        order = list(stage_names)
         for index, name in enumerate(order):
             begin = marks.get(name)
             if begin is None:
@@ -289,7 +291,10 @@ async def measure_answering(principal: Principal, questions: list[str]) -> dict:
         "stages": {name: timing.stats() for name, timing in stages.items()},
         "total": total.stats(),
         "runs": outcomes,
-        "note": "stages 由 on_state 分段；生成段包含模型加载（若尚未常驻）。",
+        "note": (
+            "stages 由 on_state 分段；生成段包含模型加载（若尚未常驻）。"
+            "核验段 = 第一层确定性核验 + **第二层语义判官**（每条主张一次模型调用）。"
+        ),
     }
 
 
@@ -402,6 +407,7 @@ def render_markdown(payload: dict) -> str:
             ("retrieve", "检索"),
             ("assemble", "装配证据"),
             ("generate", "生成"),
+            ("verify", "核验（含语义判官）"),
             ("total", "合计"),
         ):
             stats = answering["total"] if name == "total" else answering["stages"].get(name)

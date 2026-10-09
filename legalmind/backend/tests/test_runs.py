@@ -127,7 +127,9 @@ async def _latest_run(session) -> AnswerRun:
     return await session.scalar(select(AnswerRun).order_by(AnswerRun.created_at.desc()).limit(1))
 
 
-async def test_successful_answer_records_an_answered_run(monkeypatch, session_factory, make_user):
+async def test_successful_answer_records_an_answered_run(
+    monkeypatch, session_factory, make_user, semantics_pass
+):
     monkeypatch.setattr(service.generation, "available", lambda *_a, **_k: True)
     monkeypatch.setattr(
         service.generation,

@@ -29,6 +29,11 @@ from app.modules.answering.verification import normalize_for_match
 #: 判官交出的原句至少要有这么长（去空白后）才算数。
 MIN_QUOTE = 6
 
+#: 判官的输出很小（一个布尔 + 一句原句 + 至多几条 issue），256 够用；给大了只是白等——
+#: 而这一层是**每条主张一次模型调用**，省下的时间直接落在端到端延迟上。
+#: ⚠️ 评测脚本必须用**同一个值**：量的是要上线的那套，不是另一套。
+JUDGE_MAX_NEW_TOKENS = 256
+
 #: 缺陷类型（§9.3 第二层四项的落地口径）。
 ISSUE_KINDS = (
     "not_supported",
@@ -207,7 +212,8 @@ def review_claim(claim, question: str, evidence: list, generate) -> ClaimReview 
             ],
         )
 
-    # 引文既然可核对，就顺手把「可以 / 应当」这类**确定性**的一致性也核一遍（见 `modal_mismatch`）
+    # 引文既然可核对，就顺手把两类**确定性**的一致性也核一遍（见各自的 docstring）：
+    # ① 「可以 / 应当」有没有被互换；② 有没有用穷尽说法把条文的限定语抹掉。
     mismatch = modal_mismatch(claim.text or "", review.evidence_quote)
     if mismatch:
         return ClaimReview(
@@ -215,6 +221,17 @@ def review_claim(claim, question: str, evidence: list, generate) -> ClaimReview 
             evidence_quote=review.evidence_quote,
             issues=[Issue(kind="over_generalized", detail=mismatch)],
         )
+
+    # ⚠️ 这条比对的是**被引条文的全文**，不是判官抄的那句引文——限定语（「除……外」「符合规定」）
+    # 常常在引文片段之外，只比引文会漏。
+    for item in cited:
+        overreach = exhaustive_overreach(claim.text or "", item.text or "")
+        if overreach:
+            return ClaimReview(
+                supported=False,
+                evidence_quote=review.evidence_quote,
+                issues=[Issue(kind="over_generalized", detail=overreach)],
+            )
     return review
 
 
@@ -253,6 +270,71 @@ def _strip_citation_prefix(text: str) -> str:
 _CITATION_PREFIX = re.compile(
     r"^(?:《[^》]{1,80}》|[（(]?第[零一二三四五六七八九十百千0-9]{1,8}条(?:之[0-9]+)?[）)]?)"
 )
+
+
+#: 主张里的**穷尽说法**——用了它就是把这句话说成「无一例外」的全称命题。
+EXHAUSTIVE_MARKERS = (
+    "所有",
+    "任何",
+    "一律",
+    "一概",
+    "全部",
+    "无论",
+    "凡是",
+    "任何情况",
+    "无一例外",
+    "均",
+    "都",
+)
+
+#: 条文里的**限定语**——出现它就意味着「不是无条件适用」。
+#: ⚠️ 「除」单独一个字也收：法条里的「除」几乎总是引出例外（「除……外」）。
+QUALIFIER_MARKERS = (
+    "除",
+    "但是",
+    "除外",
+    "符合规定",
+    "另有规定",
+    "按照规定",
+    "有下列情形",
+    "情形之一",
+    "限于",
+    "经批准",
+    "经同意",
+    "情况下",
+)
+
+
+def exhaustive_overreach(claim_text: str, quote: str) -> str | None:
+    """主张用了**穷尽说法**，而引用的条文其实带限定语、主张又没把限定带上。
+
+    **为什么需要这条确定性规则**：实测（《技术决策与踩坑记录》§5.12）判官对「与证据相反」
+    「改了数字主体」很敏感，对**范围词**很迟钝——第一留出集漏掉的两条都是这一类
+    （「**所有**无力支付急救费用的患者都可以」「**任何**单位或者个人**在任何情况下都**不得」）。
+    语义判断没有确定答案，但「主张用了全称说法、而条文里写着条件或例外」是**可以确定核对**的，
+    所以用规则补，与 `modal_mismatch` 同一思路。
+
+    ⚠️ **只在「一边有、另一边没有」时报警**（与 `modal_mismatch` 同）：主张自己也带了限定语
+    就不算——它没把限定抹掉。这也正是**「少说」不被误伤**的原因：少说（略去例外）不等于
+    宣称无一例外，**只有穷尽说法才构成过度概括**。所以本规则要求主张里必须出现穷尽词。
+    """
+    claim = normalize_for_match(claim_text)
+    source = normalize_for_match(quote)
+    if not claim or not source:
+        return None
+    exhaustive = next((item for item in EXHAUSTIVE_MARKERS if item in claim), None)
+    if exhaustive is None:
+        return None
+    qualifiers = [item for item in QUALIFIER_MARKERS if item in source]
+    if not qualifiers:
+        return None
+    # 主张自己也把限定语带上了 → 它没抹掉限定，不算过度概括
+    if any(item in claim for item in qualifiers):
+        return None
+    return (
+        f"主张用了穷尽说法「{exhaustive}」，而引用的条文带限定语「{qualifiers[0]}」、"
+        "主张里没有——把条件或例外抹掉了"
+    )
 
 
 def modal_mismatch(claim_text: str, quote: str) -> str | None:

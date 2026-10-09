@@ -8,7 +8,8 @@
     "claims_are_verifiable": "每条断言的期望结论都能**对着条文原文复核**：好断言是条文原话（或同义改写）；坏断言各有明确缺陷，note 里写明它错在哪、正确说法在条文哪一句。",
     "defect_kinds": "坏断言的缺陷类型（§9.3 第二层四项的落地）：not_supported（证据不支持）、over_generalized（过度概括）、missing_condition（漏条件）、missing_exception（漏例外）、contradicts（与证据相反）、misattributed（引错了条款）。",
     "asymmetry": "两类错误代价不同：**放行坏断言**（漏判）会让错误结论出到用户面前；**拦下好断言**（误判）只是多转一次人工。所以阈值不对称——见 thresholds_note。",
-    "held_out": "`held_out: true` 的用例是**在提示词调过两轮之后**才加的，用来检验判官是不是被调得只认那 21 条。全量与留出两套数字都要看——**只看全量等于自证。**"
+    "held_out": "`held_out: true` 的用例是**在提示词调过两轮之后**才加的，用来检验判官是不是被调得只认那 21 条。全量与留出两套数字都要看——**只看全量等于自证。**",
+    "held_out_batches": "**第一留出集（`h01`–`h07`，7 条，2026-10-07）**：调完两轮之后才加，全量缺陷检出率落到 0.857（未达标），漏掉的两条都是**范围放大 / 抹掉例外**（「所有……都可以」「任何情况下都不得」）。**第二留出集（`h2xx`，10 条，2026-10-09）**：第一份已被看过一次，按「留出集只能用一次」的口径不再当证据，于是**先写、先冻结**一份新的——**专门盯着已知弱点**（穷尽说法 vs 条文的限定语），同时配了等量的**好断言**（含「少说允许」那条）来防「为了抓坏断言把好断言也拦掉」。⚠️ 这一份是**定向**取样，不是随机样本——它检验的是「针对已知弱点做的修补有没有效」，不能拿来宣称判官在任意断言上的准确率。"
   },
   "thresholds": {
     "defect_detection_rate": 0.9,
@@ -498,6 +499,196 @@
       "expect_supported": true,
       "defect": null,
       "note": "留出用例：条文原话的压缩改写"
+    },
+    {
+      "id": "h201",
+      "held_out": true,
+      "held_out_batch": 2,
+      "question": "民用航空器能飞入空中禁区吗？",
+      "evidence": [
+        [
+          "中华人民共和国民用航空法",
+          "82"
+        ]
+      ],
+      "claim": "民用航空器一律不得飞入空中禁区。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": false,
+      "defect": "missing_exception",
+      "note": "第二留出集：条文开头是「除按照国家有关规定经特别批准外」——主张用「一律」把例外抹掉了"
+    },
+    {
+      "id": "h202",
+      "held_out": true,
+      "held_out_batch": 2,
+      "question": "飞行中民用航空器可以投掷物品吗？",
+      "evidence": [
+        [
+          "中华人民共和国民用航空法",
+          "84"
+        ]
+      ],
+      "claim": "飞行中的民用航空器在任何情况下都不得投掷物品。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": false,
+      "defect": "missing_exception",
+      "note": "第二留出集：条文是「不得投掷物品；但是，有下列情形之一的除外」——主张用「任何情况下都」把例外抹掉了"
+    },
+    {
+      "id": "h203",
+      "held_out": true,
+      "held_out_batch": 2,
+      "question": "民用无人驾驶航空器的设计生产需要许可吗？",
+      "evidence": [
+        [
+          "中华人民共和国民用航空法",
+          "34"
+        ]
+      ],
+      "claim": "所有从事民用无人驾驶航空器设计、生产、进口、维修和飞行活动的单位都应当取得适航许可。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": false,
+      "defect": "over_generalized",
+      "note": "第二留出集：条文是「应当按照国家有关规定申请取得适航许可，按照规定无需取得适航许可的除外」——主张用「所有……都」把「无需取得的除外」抹掉了"
+    },
+    {
+      "id": "h204",
+      "held_out": true,
+      "held_out_batch": 2,
+      "question": "国家机关的公务用语用字是什么？",
+      "evidence": [
+        [
+          "中华人民共和国国家通用语言文字法",
+          "10"
+        ]
+      ],
+      "claim": "国家机关在任何情况下都应当以国家通用语言文字为公务用语用字。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": false,
+      "defect": "missing_exception",
+      "note": "第二留出集：条文末句是「法律另有规定的除外」——主张用「在任何情况下都」把例外抹掉了"
+    },
+    {
+      "id": "h205",
+      "held_out": true,
+      "held_out_batch": 2,
+      "question": "航空货运单上关于货物数量的说明有证据效力吗？",
+      "evidence": [
+        [
+          "中华人民共和国民用航空法",
+          "122"
+        ]
+      ],
+      "claim": "航空货运单上关于货物的数量、体积和情况的说明在任何情况下都构成不利于承运人的证据。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": false,
+      "defect": "contradicts",
+      "note": "第二留出集：条文说「不能构成不利于承运人的证据」（除当面查对并注明外）——主张说反了"
+    },
+    {
+      "id": "h206",
+      "held_out": true,
+      "held_out_batch": 2,
+      "question": "民用航空器飞入空中禁区的条件是什么？",
+      "evidence": [
+        [
+          "中华人民共和国民用航空法",
+          "82"
+        ]
+      ],
+      "claim": "民用航空器除按照国家有关规定经特别批准外，不得飞入空中禁区。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": true,
+      "defect": null,
+      "note": "第二留出集：条文原话（保留了「经特别批准」这一例外）"
+    },
+    {
+      "id": "h207",
+      "held_out": true,
+      "held_out_batch": 2,
+      "question": "飞行中投掷物品有什么限制？",
+      "evidence": [
+        [
+          "中华人民共和国民用航空法",
+          "84"
+        ]
+      ],
+      "claim": "飞行中，民用航空器不得投掷物品；但是，飞行安全所必需的除外。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": true,
+      "defect": null,
+      "note": "第二留出集：条文原话的压缩（保留了「除外」情形）"
+    },
+    {
+      "id": "h208",
+      "held_out": true,
+      "held_out_batch": 2,
+      "question": "国家机关的公务用语用字是什么？",
+      "evidence": [
+        [
+          "中华人民共和国国家通用语言文字法",
+          "10"
+        ]
+      ],
+      "claim": "国家机关以国家通用语言文字为公务用语用字。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": true,
+      "defect": null,
+      "note": "第二留出集：条文原话，**略去了「法律另有规定的除外」——属「少说」不是过度概括**（主张没有用「任何情况下都」这类穷尽说法）"
+    },
+    {
+      "id": "h209",
+      "held_out": true,
+      "held_out_batch": 2,
+      "question": "距离航路边界三十公里以内可以修建靶场吗？",
+      "evidence": [
+        [
+          "中华人民共和国民用航空法",
+          "92"
+        ]
+      ],
+      "claim": "在距离航路边界三十公里以内的地带，禁止修建靶场和其他可能影响飞行安全的设施；但是，平射轻武器靶场除外。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": true,
+      "defect": null,
+      "note": "第二留出集：条文原话（含「但是，平射轻武器靶场除外」）"
+    },
+    {
+      "id": "h210",
+      "held_out": true,
+      "held_out_batch": 2,
+      "question": "民用航空器的国籍登记什么情况下不得转移至国外？",
+      "evidence": [
+        [
+          "中华人民共和国民用航空法",
+          "19"
+        ]
+      ],
+      "claim": "除民用航空器经依法强制拍卖外，在已经登记的民用航空器权利得到补偿或者民用航空器权利人同意之前，民用航空器的国籍登记或者权利登记不得转移至国外。",
+      "evidence_ids": [
+        "1"
+      ],
+      "expect_supported": true,
+      "defect": null,
+      "note": "第二留出集：条文原话（保留了「除……外」）"
     }
   ]
 }

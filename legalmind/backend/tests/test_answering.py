@@ -14,7 +14,7 @@ from sqlalchemy import select
 from app.adapters import generation
 from app.core.security import Principal
 from app.models import LegalInstrument, LegalVersion, ProvisionIdentity, ProvisionVersion
-from app.modules.answering import service
+from app.modules.answering import semantics, service
 from app.modules.retrieval.schemas import CitationOut, ProvisionHit, SearchResponse
 
 pytestmark = pytest.mark.anyio
@@ -167,7 +167,7 @@ async def test_evidence_that_is_not_current_refuses_to_conclude(
 
 
 async def test_status_notice_is_attached_when_only_some_evidence_is_not_current(
-    monkeypatch, session_factory, make_user
+    monkeypatch, session_factory, make_user, semantics_pass
 ):
     """只要有一条依据不能当现行依据，答案就带上提示——但结论照出（有效的那条还在）。"""
     monkeypatch.setattr(generation, "available", lambda *_a, **_k: True)
@@ -316,7 +316,7 @@ async def test_generation_failure_degrades_instead_of_raising(
 
 
 async def test_partial_assembly_answers_but_limits_the_scope(
-    monkeypatch, session_factory, make_user
+    monkeypatch, session_factory, make_user, semantics_pass
 ):
     """装下一部分时照出结论，但**明确限定范围**并点名没装进去的是哪几条（§9.4）。"""
     monkeypatch.setattr(generation, "available", lambda *_a, **_k: True)
@@ -404,8 +404,51 @@ async def test_every_answer_carries_the_disclaimer(monkeypatch, session_factory,
     assert answer.generated_at
 
 
+async def test_semantic_gate_blocks_the_formal_answer(monkeypatch, session_factory, make_user):
+    """§9.3 第二层没过 → 不当正式答案发布（§9.4「正式答案通过门禁后发送」）。
+
+    这条钉的是**接入本身**：V1.24 建好了第二层却不敢接（判官没达标），V1.48 达标后才接进来。
+    接入之后，「判官说不支持」必须真的挡住正式结论，而不是只写进 `Answer.semantic` 里。
+    """
+    monkeypatch.setattr(generation, "available", lambda *_a, **_k: True)
+
+    def generate(_name, _messages, *, schema=None, **_kwargs):
+        # 链路上有**两次**模型调用，按 schema 分流：判官那一路给一个「不支持」的结论
+        if schema is semantics.REVIEW_SCHEMA:
+            return json.dumps(
+                {
+                    "supported": False,
+                    "evidence_quote": "",
+                    "issues": [{"kind": "over_generalized", "detail": "把条文的范围放大了"}],
+                },
+                ensure_ascii=False,
+            )
+        return _structured("模型给的结论")
+
+    monkeypatch.setattr(generation, "generate", generate)
+    monkeypatch.setattr(
+        service,
+        "search_provisions",
+        _pinned_search(
+            [_hit("中华人民共和国劳动法", "50", "第五十条　工资应当以货币形式按月支付。")]
+        ),
+    )
+    user = await make_user("reader")
+    principal = Principal(
+        organization_id=user.organization_id, user_id=user.id, roles=frozenset({"reader"})
+    )
+    async with session_factory() as session:
+        answer = await service.answer_question(session, principal, "工资怎么发？")
+
+    assert answer.published is False
+    assert answer.blocked_by == "semantics"
+    assert answer.semantic is not None and answer.semantic.ok is False
+    assert "语义核验" in answer.answer
+    assert answer.draft is not None, "没过核验时草稿要留着给人工判读"
+
+
 async def test_published_is_false_when_the_verification_gate_blocks(
-    monkeypatch, session_factory, make_user
+    monkeypatch, session_factory, make_user, semantics_pass
 ):
     """`published` 要同时覆盖两道门禁（范围 / 核验），不能只看核验。"""
     monkeypatch.setattr(generation, "available", lambda *_a, **_k: True)
@@ -472,7 +515,7 @@ def storage(tmp_path, make_client):
 
 
 async def test_answer_returns_the_retrieved_provisions_as_citations(
-    monkeypatch, make_client, make_user, session_factory, storage
+    monkeypatch, make_client, make_user, session_factory, storage, semantics_pass
 ):
     """引用来自**检索结果**而不是模型写的条号，所以天然可核验。
 

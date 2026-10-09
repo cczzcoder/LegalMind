@@ -16,6 +16,11 @@
 
 - **缺陷检出率**（坏断言被拦下）：放行坏断言是这一层存在的理由，抓不住就没意义 → 阈值 0.9
 - **好断言接受率**：判官过于谨慎只是多转一次人工，比漏判安全 → 阈值 0.8
+
+⚠️ **留出集按批次分开报**（`held_out_by_batch`）：`held_out: true` 的用例是**调过判官之后才加的**，
+用来检验判官是不是被调得只认前面那些。**一旦看着某批留出集的结果去改判官，那批就废了**——
+所以报告里逐批给数，**只看全量等于自证**（V1.24 就是这么发现 21/21 掉到 0.714 的）。
+**要改判官，先写一份新的留出集并冻结，再动它。**
 """
 
 import argparse
@@ -102,6 +107,10 @@ def _pin(case: dict, corpus: dict) -> list[PinnedProvision]:
     ]
 
 
+def _ratio(value: float | None) -> str:
+    return "—" if value is None else f"{value:.3f}"
+
+
 def _markdown(payload: dict) -> str:
     summary = payload["summary"]
     lines = [
@@ -124,6 +133,27 @@ def _markdown(payload: dict) -> str:
         lines.append(
             f"| {labels.get(key, key)} | {value} | {check['threshold']} | 越高越好 | {ok} |"
         )
+
+    batches = summary.get("held_out_by_batch") or {}
+    if batches:
+        lines += [
+            "",
+            "## 留出集（按批次）",
+            "",
+            (
+                "⚠️ 第一批（`h01`–`h07`）**已经被看过一次**，按「留出集只能用一次」的口径它不再算证据；"
+                "第二批（`h2xx`）是**先冻结、后调判官**的，才是这一轮真正的检验。"
+            ),
+            "",
+            "| 批次 | 条数 | 准确率 | 缺陷检出率 | 好断言接受率 |",
+            "| --- | ---: | ---: | ---: | ---: |",
+        ]
+        for name, item in batches.items():
+            lines.append(
+                f"| 第 {name} 批 | {item['cases']} | {_ratio(item['accuracy'])} | "
+                f"{_ratio(item['defect_detection_rate'])} | "
+                f"{_ratio(item['supported_acceptance_rate'])} |"
+            )
 
     lines += [
         "",
@@ -202,6 +232,7 @@ async def run(args) -> int:
             "expect_supported": case["expect_supported"],
             "defect": case.get("defect"),
             "held_out": bool(case.get("held_out")),
+            "held_out_batch": case.get("held_out_batch"),
             "supported": supported,
             "correct": verdict is not None and supported == case["expect_supported"],
             "reason": verdict.summary() if verdict is not None else "判官没有给出可解析的结论",
@@ -239,12 +270,34 @@ async def run(args) -> int:
         for key in ("defect_detection_rate", "supported_acceptance_rate")
     }
     held = [r for r in records if r["held_out"]]
+    # **留出集要按批次分开报**：第一份（h01–h07）已经被看过一次，按「留出集只能用一次」的口径
+    # 它不再算证据；第二批（h2xx）是先冻结、后调判官的，才是这一轮真正的检验。
+    batches: dict[str, dict] = {}
+    for batch in sorted({r["held_out_batch"] for r in held if r["held_out_batch"] is not None}):
+        group = [r for r in held if r["held_out_batch"] == batch]
+        batches[str(batch)] = {
+            "cases": len(group),
+            "accuracy": sum(1 for r in group if r["correct"]) / len(group),
+            "defect_detection_rate": (
+                sum(1 for r in group if not r["expect_supported"] and not r["supported"])
+                / sum(1 for r in group if not r["expect_supported"])
+                if any(not r["expect_supported"] for r in group)
+                else None
+            ),
+            "supported_acceptance_rate": (
+                sum(1 for r in group if r["expect_supported"] and r["supported"])
+                / sum(1 for r in group if r["expect_supported"])
+                if any(r["expect_supported"] for r in group)
+                else None
+            ),
+        }
     summary = {
         "cases": len(records),
         "counts": {"good": len(good), "bad": len(bad), "held_out": len(held)},
         "metrics": metrics,
         "checks": checks,
         "held_out_accuracy": (sum(1 for r in held if r["correct"]) / len(held) if held else None),
+        "held_out_by_batch": batches,
         "passed": all(check["ok"] for check in checks.values() if check["ok"] is not None),
     }
     payload = {
@@ -272,8 +325,12 @@ async def run(args) -> int:
     held_value = summary["held_out_accuracy"]
     if held_value is not None:
         # **只看全量等于自证**：留出用例是调过提示词之后才加的，单独报出来
+        print(f"  · 留出用例准确率（全部）: {held_value:.3f}（{summary['counts']['held_out']} 条）")
+    for name, item in (summary.get("held_out_by_batch") or {}).items():
         print(
-            f"  · 留出用例准确率: {held_value:.3f}（{summary['counts']['held_out']} 条，调提示词之后才加的）"
+            f"    - 第 {name} 批：准确率 {_ratio(item['accuracy'])} / 缺陷检出率 "
+            f"{_ratio(item['defect_detection_rate'])} / 好断言接受率 "
+            f"{_ratio(item['supported_acceptance_rate'])}（{item['cases']} 条）"
         )
     print(f"报告：{json_path}")
     print(f"      {md_path}")
@@ -296,7 +353,7 @@ def main() -> int:
     parser.add_argument("--dataset", default=str(DEFAULT_DATASET))
     parser.add_argument("--out", default=str(DEFAULT_OUT))
     parser.add_argument("--model", default=None)
-    parser.add_argument("--max-new-tokens", type=int, default=512)
+    parser.add_argument("--max-new-tokens", type=int, default=semantics.JUDGE_MAX_NEW_TOKENS)
     parser.add_argument("--ids", default="", help="逗号分隔的断言 id，只跑这些")
     parser.add_argument("--gate", action="store_true", help="未达标时退出码 1")
     return asyncio.run(_main(parser.parse_args()))

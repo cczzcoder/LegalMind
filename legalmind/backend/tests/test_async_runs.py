@@ -144,7 +144,7 @@ async def test_submitted_question_is_redacted_before_caching(session_factory, ma
 
 
 async def test_worker_updates_the_same_run_and_caches_the_answer(
-    monkeypatch, session_factory, make_user
+    monkeypatch, session_factory, make_user, semantics_pass
 ):
     """**一次运行只有一行记录**：worker 更新 submit 时建好的那一行，不再建新行。"""
     principal = await _principal(make_user)
@@ -236,7 +236,9 @@ async def test_cached_answer_is_redacted(monkeypatch, session_factory, make_user
     assert "[身份证_1]" in cached_answer
 
 
-async def test_retry_resets_the_run_before_rerunning(monkeypatch, session_factory, make_user):
+async def test_retry_resets_the_run_before_rerunning(
+    monkeypatch, session_factory, make_user, semantics_pass
+):
     """任务重试是**同一次运行的下一次尝试**——不复位就会撞上转移表（`GENERATING → RETRIEVING` 不合法）。"""
     principal = await _principal(make_user)
     cache = _FakeCache()

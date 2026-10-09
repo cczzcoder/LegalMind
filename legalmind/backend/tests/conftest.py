@@ -110,3 +110,18 @@ def make_user(session_factory):
             )
 
     return make
+
+
+@pytest.fixture
+def semantics_pass(monkeypatch):
+    """把 §9.3 **第二层语义核验**换成「通过」。
+
+    链路上有**两次**模型调用：生成结论、语义判官。只关心前者的用例用这个 fixture——
+    判官本身由 `tests/test_semantics.py`（服务端怎么处理判官的结论）与
+    `scripts/evaluate_semantics.py`（判官本人的水平）负责。在这里再糊一个「判官替身」
+    只会把两件事搅在一起，而且判官要求交出**条文原句**才能判支持，替身很难通用。
+    """
+    from app.modules.answering import semantics
+    from app.modules.answering.semantics import SemanticReview
+
+    monkeypatch.setattr(semantics, "review", lambda *_a, **_k: SemanticReview(ok=True, reviews=()))

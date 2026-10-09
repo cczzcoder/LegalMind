@@ -113,6 +113,69 @@ def test_modal_swap_is_caught_deterministically():
     )
 
 
+def test_exhaustive_overreach_is_caught_deterministically():
+    """主张用穷尽说法把条文的限定语抹掉——判官对范围词迟钝，所以用确定性规则补上。
+
+    这是第一留出集暴露出来的唯一弱点（两条漏判都是这一类），也是本规则存在的理由。
+    """
+    source = "第四十五条　除国家另有规定外，任何单位或者个人不得擅自携带、传递审计工作底稿出境。"
+    # 主张用「任何情况下都」把「除国家另有规定外」抹掉了 → 报警
+    assert semantics.exhaustive_overreach(
+        "任何单位或者个人在任何情况下都不得携带审计工作底稿出境", source
+    )
+    # 主张用「所有……都」把条文的限定抹掉 → 报警
+    assert semantics.exhaustive_overreach(
+        "所有单位都不得携带审计工作底稿出境",
+        "从事民用无人驾驶航空器设计、生产、进口、维修和飞行活动的，应当按照国家有关规定申请取得"
+        "适航许可，按照规定无需取得适航许可的除外。",
+    )
+
+
+def test_exhaustive_overreach_does_not_punish_under_stating():
+    """**少说不等于宣称无一例外**——「略去例外」是允许的，只有穷尽说法才构成过度概括。
+
+    这条是防误伤的关键：判官本来就偏严，规则再乱开火就只会把好断言也拦掉。
+    """
+    source = "第四十五条　除国家另有规定外，任何单位或者个人不得擅自携带、传递审计工作底稿出境。"
+    # 主张只是「少说」，没有穷尽词 → 不报警
+    assert semantics.exhaustive_overreach("携带审计工作底稿出境需经批准", source) is None
+    # 主张自己也把限定语带上了 → 它没抹掉限定 → 不报警
+    assert (
+        semantics.exhaustive_overreach(
+            "除国家另有规定外，任何单位都不得携带审计工作底稿出境", source
+        )
+        is None
+    )
+    # 条文本来就没有限定语 → 「都」不构成过度概括
+    assert (
+        semantics.exhaustive_overreach(
+            "自治区、自治州、自治县都是民族自治地方",
+            "自治区、自治州、自治县都是民族自治地方。",
+        )
+        is None
+    )
+    # 空输入不炸
+    assert semantics.exhaustive_overreach("", source) is None
+    assert semantics.exhaustive_overreach("任何单位都应当依法支付工资", "") is None
+
+
+def test_exhaustive_overreach_downgrades_a_supported_verdict():
+    """判官说支持、引文也能核对上，但主张把条文的例外抹了 → 服务端降级为不支持。"""
+    claim = Claim(text="任何单位或者个人在任何情况下都不得携带审计工作底稿出境", evidence_ids=["2"])
+    verdict = semantics.review_claim(
+        claim,
+        "审计工作底稿能带出境吗？",
+        EVIDENCE,
+        _judge(
+            '{"supported": true, "evidence_quote": "任何单位或者个人不得擅自携带、传递审计工作底稿出境。",'
+            ' "issues": []}'
+        ),
+    )
+    assert verdict.supported is False
+    assert verdict.issues[0].kind == "over_generalized"
+    assert "穷尽说法" in verdict.summary()
+
+
 def test_modal_swap_downgrades_a_supported_verdict():
     claim = Claim(text="用人单位逾期不缴纳社会保险费的，应当加收滞纳金", evidence_ids=["1"])
     verdict = semantics.review_claim(

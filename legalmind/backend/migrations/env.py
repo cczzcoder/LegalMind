@@ -6,7 +6,11 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app import models  # noqa: F401
 from app.core.config import get_settings
-from app.core.database import Base
+
+# ⚠️ `Base` 从 `app.models` 拿，**不要从 `app.core.database` 拿**：后者在 import 时会
+# `create_async_engine(get_settings().database_url)`，而 `Base` 已搬到 `app/models/base.py`
+# 以断开 `core ↔ models` 的循环依赖（见 `app/models/base.py` 的模块注释）。
+from app.models import Base
 
 target_metadata = Base.metadata
 database_url = get_settings().database_url

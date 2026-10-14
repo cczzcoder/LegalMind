@@ -29,7 +29,15 @@ jobs:
     timeout-minutes: 15
     services:
       postgres:
-        image: postgres:17
+        # ⚠️⚠️ **必须是带 pgvector 的镜像**。迁移 0015（`provision_embeddings`）会执行
+        # `CREATE EXTENSION IF NOT EXISTS vector`，而原生 `postgres:17` **不带这个扩展**，
+        # 于是 `alembic upgrade head` 直接失败：
+        #     extension "vector" is not available
+        #     Could not open extension control file ".../extension/vector.control"
+        # 本地 compose.yaml 用的就是 pgvector 镜像，所以「本地全绿、CI 全红」——
+        # 这个不一致从迁移 0015 落地（V1.13）起就存在，只是直到 V1.46 才被发现。
+        # 摘要与 compose.yaml 保持一致，让 CI 与本地跑在同一份字节上。
+        image: pgvector/pgvector:pg17@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
         env:
           POSTGRES_USER: legalmind
           POSTGRES_PASSWORD: legalmind

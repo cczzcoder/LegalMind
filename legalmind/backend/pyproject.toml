@@ -55,6 +55,13 @@ include = ["app*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# ⚠️ `pythonpath` 必须显式写上：`tests/` **没有 `__init__.py`**，那 20 个测试文件里的
+# `from tests.helpers import ...` 是靠**命名空间包**（PEP 420）成立的，而这要求 backend/
+# 在 `sys.path` 里。`python -m pytest` 会自动把 cwd 加进 `sys.path`，所以本地一直绿；
+# **直接调 `pytest` 脚本（CI 里写的就是 `pytest -q`）不会** ⇒ 收集期报
+# `ModuleNotFoundError: No module named 'tests'`、exit 2（V1.52 修）。
+# ⚠️ 因此：**本地也要能用 `pytest` 直接跑**，别只测 `python -m pytest`。
+pythonpath = ["."]
 
 [tool.ruff]
 target-version = "py312"

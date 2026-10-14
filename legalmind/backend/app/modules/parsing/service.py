@@ -27,10 +27,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.storage import LocalFileStorage
+from app.core.document_types import PARSE_CONFIG_VERSION
 from app.core.security import Principal
 from app.models import Chunk, ChunkSpan, ParseRevision, SourceArtifact
 from app.modules.authorization.grants import record_event
-from app.modules.documents.service import PARSE_CONFIG_VERSION
 from app.modules.legal_corpus.service import ArticleChunk, link_legal_version
 from app.modules.legal_corpus.structure import detect_structure
 from app.modules.parsing.chunking import chunk_blocks, text_sha256

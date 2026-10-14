@@ -23,7 +23,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from app.modules.parsing.interface import Block
+from app.core.document_types import Block
 
 # 结构层级；与 models.PROVISION_TYPES 的取值一致（这里只识别前四级）
 PART = "part"

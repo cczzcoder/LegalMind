@@ -19,7 +19,7 @@ from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
-from app.modules.documents.validation import DOCX
+from app.core.document_types import DOCX
 from app.modules.parsing.interface import (
     DocumentAssembler,
     DocumentParser,

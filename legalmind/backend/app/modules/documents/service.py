@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.storage import LocalFileStorage
+from app.core.document_types import PARSE_CONFIG_VERSION
 from app.core.security import Principal
 from app.models import AccessGrant, AuditEvent, Job, SourceArtifact
 from app.modules.authorization import grants
@@ -24,8 +25,6 @@ from app.modules.documents.validation import RejectedFile, clean_filename, detec
 from app.modules.sources.service import get_source
 
 PARSE_JOB = "document.parse"
-# 解析处理配置版本；解析器选定后随配置变化递增（设计 7.1）
-PARSE_CONFIG_VERSION = "v1"
 
 
 async def import_document(

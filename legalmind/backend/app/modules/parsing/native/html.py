@@ -7,7 +7,7 @@
 import lxml.html
 from lxml import etree
 
-from app.modules.documents.validation import HTML
+from app.core.document_types import HTML
 from app.modules.parsing.interface import (
     DocumentAssembler,
     DocumentParser,

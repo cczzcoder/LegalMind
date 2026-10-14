@@ -9,10 +9,7 @@ import re
 import zipfile
 from pathlib import PurePath
 
-DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-PDF = "application/pdf"
-HTML = "text/html"
-TEXT = "text/plain"
+from app.core.document_types import DOCX, HTML, PDF, TEXT
 
 EXTENSIONS = {".docx": DOCX, ".pdf": PDF, ".html": HTML, ".htm": HTML, ".txt": TEXT}
 

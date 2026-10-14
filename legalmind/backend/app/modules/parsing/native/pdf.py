@@ -16,7 +16,7 @@ from abc import abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass
 
-from app.modules.documents.validation import PDF
+from app.core.document_types import PDF
 from app.modules.parsing.interface import (
     QUALITY_NEEDS_REVIEW,
     QUALITY_OK,

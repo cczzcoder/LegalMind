@@ -35,6 +35,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.document_types import text_sha256
 from app.core.security import Principal
 from app.models import (
     Chunk,
@@ -55,7 +56,6 @@ from app.modules.legal_corpus.metadata import (
     extract_metadata,
     normalize_document_number,
 )
-from app.modules.parsing.chunking import text_sha256
 
 # 与 models.PROVISION_TYPES 一致；第一版只为「条」建身份（设计 §5.2）
 ARTICLE = "article"

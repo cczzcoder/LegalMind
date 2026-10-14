@@ -23,7 +23,7 @@ import importlib.metadata
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
-from app.modules.documents.validation import DOCX, HTML, PDF, TEXT
+from app.core.document_types import DOCX, HTML, PDF, TEXT, Block
 
 # 解析质量状态，与 models.PARSE_QUALITY_STATUSES 一致（pending 由登记时使用）
 QUALITY_OK = "ok"
@@ -68,27 +68,6 @@ class ParseLimits:
     max_pages: int
     max_chars: int
     memory_budget_bytes: int
-
-
-@dataclass(frozen=True)
-class Block:
-    """规范化文本中的一个块，带其在原件中的定位（设计 §6）。
-
-    ``bbox`` 为归一化页面坐标 ``(x0, y0, x1, y1)``；无版面概念的格式（HTML、TXT）为 ``None``，
-    此时 ``coordinate_system`` 也为 ``None``（数据库约束要求两者同时有或同时无）。
-    """
-
-    ordinal: int
-    kind: str
-    text: str
-    char_start: int
-    char_end: int
-    page_index: int | None = None
-    printed_page_label: str | None = None
-    block_id: str | None = None
-    coordinate_system: str | None = None
-    bbox: tuple[float, float, float, float] | None = None
-    level: int | None = None
 
 
 @dataclass(frozen=True)

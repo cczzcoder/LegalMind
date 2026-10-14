@@ -7,7 +7,7 @@
 """
 
 from app.core.config import get_settings
-from app.modules.documents.validation import DOCX, HTML, PDF, TEXT
+from app.core.document_types import DOCX, HTML, PDF, TEXT
 from app.modules.parsing.interface import (
     DocumentParser,
     ParseLimits,

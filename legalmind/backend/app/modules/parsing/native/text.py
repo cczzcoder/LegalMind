@@ -4,7 +4,7 @@
 纯文本没有版面概念，不产生页记录，也不写 bbox（设计 §6：无页概念的格式不强制页码）。
 """
 
-from app.modules.documents.validation import TEXT
+from app.core.document_types import TEXT
 from app.modules.parsing.interface import (
     DocumentAssembler,
     DocumentParser,

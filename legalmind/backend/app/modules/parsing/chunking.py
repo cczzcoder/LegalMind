@@ -13,19 +13,15 @@ chunk 还原，与 ``ParseRevision.text_sha256``（**脱敏前**原文的哈希�
 ``redaction.service.redacted_slice`` 维护。
 """
 
-import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from app.core.document_types import text_sha256
 from app.modules.legal_corpus.structure import StructureOutline
 from app.modules.parsing.interface import Block
 
 # 单个 chunk 的目标字符上限；块不可再分，故超长单块会独占一个 chunk
 DEFAULT_MAX_CHARS = 800
-
-
-def text_sha256(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)

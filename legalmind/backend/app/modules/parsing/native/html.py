@@ -94,6 +94,16 @@ class HtmlParser(DocumentParser):
         if len(content) > limits.max_bytes:
             raise DocumentTooLarge("HTML document exceeds the parsing size limit")
 
+        # ⚠️⚠️ **NUL 字节必须自己判，不能指望 libxml2**。`b"\x00"` 是**合法 UTF-8**，能过下面的
+        # 解码；而 libxml2 对它的处置**随版本而变**——实测（2026-10-14）同一个 lxml 6.1.3：
+        #   libxml2 2.11（Windows 本机）→ 把整份文档判成空，抛 `ParserError: Document is empty`
+        #   libxml2 2.14（Linux / CI）  → 替换成 U+FFFD 后照常解析，返回一份垃圾文档
+        # 于是「不可解析的输入」在旧版上抛错、在新版上**静默返回空内容**——同一份代码两个平台
+        # 两种行为，而 CI 恰好是后者。这里自己判，让行为与 libxml2 版本无关；
+        # HTML 里 NUL 本就是非法字符，拒绝它不会有任何正当输入被误伤。
+        if b"\x00" in content:
+            raise ParseError("HTML document contains NUL bytes")
+
         # no_network 禁联网；huge_tree=False 限制深度与文本长度，防实体膨胀/深层嵌套打爆内存
         parser = lxml.html.HTMLParser(no_network=True, huge_tree=False, recover=True)
         try:

@@ -1,0 +1,320 @@
+{
+  "version": 1,
+  "built_on": "2026-10-15",
+  "corpus": "同 claim_verification.json（13 部法律法规，条款版本取自当前库）",
+  "purpose": "第三份留出集：**专测「批量判定」**（把一次一条主张改成一次判多条）引入的失效模式。前两份留出集（h01–h07、h2xx）都是「一条用例一条主张」，结构上测不出批量才有的问题。",
+  "design": {
+    "why_groups": "批量判定把 N 次模型调用压成 1 次，风险不在「判得准不准」，而在「多条一起判时会不会互相影响」。所以这份金标准按**组**组织：一组 = 一个提问 + 一批证据 + 该答案的多条主张（模拟真实 answer.claims）。",
+    "three_risks": {
+      "cross_talk": "串扰——判第 2 条时被第 1 条影响，把好断言判坏、或把坏断言放行。c01/c04/c05/c06 专测。",
+      "position_bias": "位置偏差——靠前/靠后的主张被区别对待。c01 与 c02 是同证据、同内容、**顺序相反**的一对，两次结果必须一致。",
+      "omission": "遗漏——批量输出时漏掉某条主张（漏一条等于放行）。c03（4 条）与 c07（4 条全好）专测。"
+    },
+    "claims_are_verifiable": "每条断言的期望结论都能对着条文原文复核，好断言是条文原话或忠实概括，坏断言各有明确的 defect 类型与出处。",
+    "frozen": "本文件一经写入即冻结：**不得**在看过判官结果之后再改任何一条——那会让这批用例失去资格（同 h01–h07、h2xx 的纪律）。"
+  },
+  "thresholds": {
+    "defect_detection_rate": 0.9,
+    "supported_acceptance_rate": 0.8,
+    "per_claim_required": true
+  },
+  "thresholds_note": "阈值沿用前两份（缺陷检出率 ≥ 0.9、好断言接受率 ≥ 0.8），但**判据更严**：这份里**每条主张都要判对**（`per_claim_required`），不能只看整组通过——批量判定最容易出的就是「大部分对、漏一两条」，而漏掉的那条会直接进正式答案。",
+  "groups": [
+    {
+      "id": "c01",
+      "probe": "串扰 + 位置偏差（坏断言在前）",
+      "note": "与 c02 是同证据、同内容、顺序相反的一对：两次结果必须一致，否则就是位置偏差。",
+      "question": "工资怎么发放？克扣工资会怎么处理？",
+      "evidence": [["中华人民共和国劳动法", "50"], ["中华人民共和国劳动法", "91"]],
+      "claims": [
+        {
+          "claim": "工资可以用实物发放。",
+          "evidence_ids": ["1"],
+          "expect_supported": false,
+          "defect": "contradicts",
+          "note": "第五十条写的是「工资应当以货币形式按月支付给劳动者本人」——主张与之相反"
+        },
+        {
+          "claim": "工资应当以货币形式按月支付给劳动者本人。",
+          "evidence_ids": ["1"],
+          "expect_supported": true,
+          "defect": null,
+          "note": "第五十条原话"
+        },
+        {
+          "claim": "用人单位克扣劳动者工资的，由劳动行政部门责令支付劳动者的工资报酬、经济补偿，并可以责令支付赔偿金。",
+          "evidence_ids": ["2"],
+          "expect_supported": true,
+          "defect": null,
+          "note": "第九十一条原话（该项在「（一）克扣或者无故拖欠劳动者工资的」）"
+        },
+        {
+          "claim": "用人单位无故拖欠劳动者工资的，一律追究刑事责任。",
+          "evidence_ids": ["1"],
+          "expect_supported": false,
+          "defect": "not_supported",
+          "note": "条文只规定行政责任（责令支付、赔偿金），没有任何刑责内容"
+        }
+      ]
+    },
+    {
+      "id": "c02",
+      "probe": "位置偏差对照（好断言在前，与 c01 顺序相反）",
+      "note": "内容与 c01 完全相同，只调换顺序。c01 与 c02 的判定结果必须一致。",
+      "question": "工资怎么发放？克扣工资会怎么处理？",
+      "evidence": [["中华人民共和国劳动法", "50"], ["中华人民共和国劳动法", "91"]],
+      "claims": [
+        {
+          "claim": "工资应当以货币形式按月支付给劳动者本人。",
+          "evidence_ids": ["1"],
+          "expect_supported": true,
+          "defect": null,
+          "note": "第五十条原话"
+        },
+        {
+          "claim": "用人单位克扣劳动者工资的，由劳动行政部门责令支付劳动者的工资报酬、经济补偿，并可以责令支付赔偿金。",
+          "evidence_ids": ["2"],
+          "expect_supported": true,
+          "defect": null,
+          "note": "第九十一条原话"
+        },
+        {
+          "claim": "工资可以用实物发放。",
+          "evidence_ids": ["1"],
+          "expect_supported": false,
+          "defect": "contradicts",
+          "note": "与「以货币形式」相反"
+        },
+        {
+          "claim": "用人单位无故拖欠劳动者工资的，一律追究刑事责任。",
+          "evidence_ids": ["1"],
+          "expect_supported": false,
+          "defect": "not_supported",
+          "note": "条文无刑责内容"
+        }
+      ]
+    },
+    {
+      "id": "c03",
+      "probe": "遗漏（4 条主张，必须条条有结论）",
+      "note": "一组 4 条，其中 3 条好、1 条坏。批量输出若漏掉任何一条（尤其最后一条），都算失败。",
+      "question": "社会救助分为哪几类？",
+      "evidence": [["中华人民共和国社会救助法", "15"]],
+      "claims": [
+        {
+          "claim": "社会救助分为基本生活救助、专项社会救助和急难社会救助。",
+          "evidence_ids": ["1"],
+          "expect_supported": true,
+          "defect": null,
+          "note": "第十五条原话"
+        },
+        {
+          "claim": "基本生活救助包括特困人员供养和最低生活保障。",
+          "evidence_ids": ["1"],
+          "expect_supported": true,
+          "defect": null,
+          "note": "第十五条原话"
+        },
+        {
+          "claim": "专项社会救助包括医疗救助、教育救助、住房救助、就业救助、受灾人员救助。",
+          "evidence_ids": ["1"],
+          "expect_supported": true,
+          "defect": null,
+          "note": "第十五条原话"
+        },
+        {
+          "claim": "社会救助分为基本生活救助和专项社会救助两类。",
+          "evidence_ids": ["1"],
+          "expect_supported": false,
+          "defect": "not_supported",
+          "note": "条文是**三类**（还有急难社会救助）——漏掉一类"
+        }
+      ]
+    },
+    {
+      "id": "c04",
+      "probe": "串扰（好/坏断言引同一条文）",
+      "note": "4 条都引第一百条，2 好 2 坏交替。若判官被前一条带偏，第 2、3 条最容易被判错。",
+      "question": "用人单位不缴社会保险费会怎么处理？",
+      "evidence": [["中华人民共和国劳动法", "100"]],
+      "claims": [
+        {
+          "claim": "用人单位无故不缴纳社会保险费的，由劳动行政部门责令其限期缴纳。",
+          "evidence_ids": ["1"],
+          "expect_supported": true,
+          "defect": null,
+          "note": "第一百条前半句原话"
+        },
+        {
+          "claim": "用人单位逾期不缴纳社会保险费的，应当加收滞纳金。",
+          "evidence_ids": ["1"],
+          "expect_supported": false,
+          "defect": "over_generalized",
+          "note": "条文是「**可以**加收滞纳金」——把裁量说成了义务"
+        },
+        {
+          "claim": "用人单位不缴纳社会保险费的，一律由劳动行政部门责令限期缴纳。",
+          "evidence_ids": ["1"],
+          "expect_supported": false,
+          "defect": "missing_exception",
+          "note": "条文限定「**无故**不缴纳的」——主张把限定语抹掉，还加了「一律」"
+        },
+        {
+          "claim": "用人单位逾期不缴纳社会保险费的，可以加收滞纳金。",
+          "evidence_ids": ["1"],
+          "expect_supported": true,
+          "defect": null,
+          "note": "第一百条后半句原话"
+        }
+      ]
+    },
+    {
+      "id": "c05",
+      "probe": "串扰 + 误引条文（证据里没有那条）",
+      "note": "证据只给了第五十条与第一百条；第 1 条主张的内容其实来自第九十一条（不在证据里）。",
+      "question": "克扣工资会怎么处理？",
+      "evidence": [["中华人民共和国劳动法", "50"], ["中华人民共和国劳动法", "100"]],
+      "claims": [
+        {
+          "claim": "用人单位克扣劳动者工资的，由劳动行政部门责令支付赔偿金。",
+          "evidence_ids": ["1"],
+          "expect_supported": false,
+          "defect": "misattributed",
+          "note": "该内容出自**第九十一条**，而证据里只有第五十条与第一百条——第五十条只说不得克扣，没有「责令支付赔偿金」"
+        },
+        {
+          "claim": "工资应当以货币形式按月支付给劳动者本人。",
+          "evidence_ids": ["1"],
+          "expect_supported": true,
+          "defect": null,
+          "note": "第五十条原话"
+        },
+        {
+          "claim": "用人单位无故不缴纳社会保险费的，由劳动行政部门责令其限期缴纳。",
+          "evidence_ids": ["2"],
+          "expect_supported": true,
+          "defect": null,
+          "note": "第一百条原话"
+        },
+        {
+          "claim": "用人单位克扣工资的，由劳动行政部门责令其限期缴纳社会保险费。",
+          "evidence_ids": ["2"],
+          "expect_supported": false,
+          "defect": "contradicts",
+          "note": "把「克扣工资」与「不缴社保费」两件事混在一起，第一百条管的是后者"
+        }
+      ]
+    },
+    {
+      "id": "c06",
+      "probe": "串扰（同一条文的好/坏断言交替）",
+      "note": "4 条都引矿产资源法实施条例第十五条，好/坏交替，且坏断言只差一个数字或一个限定词。",
+      "question": "探矿权能续几次？采矿权期限多长？",
+      "evidence": [["中华人民共和国矿产资源法实施条例", "15"]],
+      "claims": [
+        {
+          "claim": "探矿权的期限为5年，期限届满可以续期，续期最多不超过3次。",
+          "evidence_ids": ["1"],
+          "expect_supported": true,
+          "defect": null,
+          "note": "第十五条原话"
+        },
+        {
+          "claim": "探矿权续期最多不超过5次。",
+          "evidence_ids": ["1"],
+          "expect_supported": false,
+          "defect": "not_supported",
+          "note": "条文是「最多不超过**3次**」——数字被改"
+        },
+        {
+          "claim": "探矿权期限届满一律可以无限次续期。",
+          "evidence_ids": ["1"],
+          "expect_supported": false,
+          "defect": "over_generalized",
+          "note": "条文有次数上限（3次），且增加续期次数只对特定战略性矿产、需经主管部门同意——「一律无限次」两头都错"
+        },
+        {
+          "claim": "采矿权的期限最长不超过30年。",
+          "evidence_ids": ["1"],
+          "expect_supported": true,
+          "defect": null,
+          "note": "第十五条原话"
+        }
+      ]
+    },
+    {
+      "id": "c07",
+      "probe": "遗漏 + 误伤（4 条全好断言）",
+      "note": "全好断言，用来检验批量判定会不会「凑数」地判坏一条，以及会不会漏判。",
+      "question": "行政区域怎么划分？",
+      "evidence": [["中华人民共和国宪法", "30"]],
+      "claims": [
+        {
+          "claim": "全国分为省、自治区、直辖市。",
+          "evidence_ids": ["1"],
+          "expect_supported": true,
+          "defect": null,
+          "note": "第三十条原话（第一项）"
+        },
+        {
+          "claim": "省、自治区分为自治州、县、自治县、市。",
+          "evidence_ids": ["1"],
+          "expect_supported": true,
+          "defect": null,
+          "note": "第三十条原话（第二项）"
+        },
+        {
+          "claim": "县、自治县分为乡、民族乡、镇。",
+          "evidence_ids": ["1"],
+          "expect_supported": true,
+          "defect": null,
+          "note": "第三十条原话（第三项）"
+        },
+        {
+          "claim": "自治区、自治州、自治县都是民族自治地方。",
+          "evidence_ids": ["1"],
+          "expect_supported": true,
+          "defect": null,
+          "note": "第三十条末句原话"
+        }
+      ]
+    },
+    {
+      "id": "c08",
+      "probe": "位置偏差（坏断言在前）+ 例外抹除",
+      "note": "第 1 条与第 4 条都是坏断言，分别放在最前和最后，中间夹两条好的。",
+      "question": "审计工作底稿要存放在哪里？",
+      "evidence": [["中华人民共和国注册会计师法", "45"]],
+      "claims": [
+        {
+          "claim": "审计工作底稿可以携带出境。",
+          "evidence_ids": ["1"],
+          "expect_supported": false,
+          "defect": "contradicts",
+          "note": "条文是「除国家另有规定外，任何单位或者个人**不得**擅自携带、传递审计工作底稿或者审计档案出境」——主张与之相反"
+        },
+        {
+          "claim": "审计工作底稿和审计档案应当存放在中国境内。",
+          "evidence_ids": ["1"],
+          "expect_supported": true,
+          "defect": null,
+          "note": "第四十五条原话"
+        },
+        {
+          "claim": "会计师事务所应当加强对审计工作底稿和审计档案的管理，保证其真实、完整。",
+          "evidence_ids": ["1"],
+          "expect_supported": true,
+          "defect": null,
+          "note": "第四十五条原话"
+        },
+        {
+          "claim": "任何单位或者个人不得携带、传递审计工作底稿出境。",
+          "evidence_ids": ["1"],
+          "expect_supported": false,
+          "defect": "missing_exception",
+          "note": "条文有「除国家另有规定外」这个例外，且限定的是「**擅自**」——主张把例外与限定词都抹掉了"
+        }
+      ]
+    }
+  ]
+}

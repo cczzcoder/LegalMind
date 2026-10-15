@@ -188,9 +188,119 @@ def _markdown(payload: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _flatten_groups(groups: list[dict]) -> list[dict]:
+    """把「多主张组」展开成单条断言，好让下面的逐条评测逻辑直接复用。
+
+    ⚠️ 展开后同一组的各条**共享 question 与 evidence**——这正是批量判定的输入形态。
+    逐条跑时它们互不影响，所以这份展开结果是「批量优化前」的基线：
+    批量判定后**不能低于**它，且组内串扰/漏判会在对比里现形。
+    """
+    out: list[dict] = []
+    for group in groups:
+        for index, claim in enumerate(group["claims"], start=1):
+            out.append(
+                {
+                    "id": f"{group['id']}-{index}",
+                    "group": group["id"],
+                    "probe": group.get("probe"),
+                    "question": group["question"],
+                    "evidence": group["evidence"],
+                    "claim": claim["claim"],
+                    "evidence_ids": claim["evidence_ids"],
+                    "expect_supported": claim["expect_supported"],
+                    "defect": claim.get("defect"),
+                    "held_out": True,
+                    "held_out_batch": "第三批（批量场景）",
+                    "note": claim.get("note"),
+                }
+            )
+    return out
+
+
+def _record(case: dict, verdict, seconds: float, *, batch_seconds=None, degraded=None) -> dict:
+    """把一条判定整理成记录。逐条与批量**共用同一套字段**，好放在一起统计。"""
+    supported = bool(verdict.supported) if verdict is not None else False
+    record = {
+        "id": case["id"],
+        "expect_supported": case["expect_supported"],
+        "defect": case.get("defect"),
+        "held_out": bool(case.get("held_out")),
+        "held_out_batch": case.get("held_out_batch"),
+        "supported": supported,
+        "correct": verdict is not None and supported == case["expect_supported"],
+        "reason": verdict.summary() if verdict is not None else "判官没有给出可解析的结论",
+        "quote": (verdict.evidence_quote if verdict is not None else ""),
+        "claim": case["claim"],
+        "note": case.get("note"),
+        "seconds": seconds,
+    }
+    if batch_seconds is not None:
+        record["batch_seconds"] = batch_seconds
+    if degraded is not None:
+        record["degraded"] = degraded
+    return record
+
+
+def _run_per_claim(cases, corpus, generate) -> list[dict]:
+    """逐条模式：一条主张一次模型调用（批量优化前的行为，也是**降级路径**）。"""
+    records = []
+    for case in cases:
+        evidence = _pin(case, corpus)
+        # 断言本身也走 §9.2 的结构（`claims.Claim`），这样判官看到的输入与线上完全一致
+        target = Claim(text=case["claim"], evidence_ids=case["evidence_ids"])
+        started = time.perf_counter()
+        verdict = semantics.review_claim(target, case["question"], evidence, generate)
+        seconds = time.perf_counter() - started
+        record = _record(case, verdict, seconds)
+        records.append(record)
+        print(
+            f"  [{'OK' if record['correct'] else '!!'}] {record['id']} {seconds:5.1f}s  "
+            f"{case['claim'][:40]}"
+        )
+    return records
+
+
+def _run_batch(groups, corpus, generate) -> list[dict]:
+    """批量模式：**一组主张一次模型调用**（`semantics.review_claims`），再逐条比对。
+
+    ⚠️ 批量不可用时按线上行为**降级逐条**，并在记录里标 `degraded=True`——
+    否则「批量没生效」会被误读成「批量表现差」，两个结论完全相反。
+    """
+    records = []
+    for group in groups:
+        evidence = _pin({"evidence": group["evidence"]}, corpus)
+        targets = [
+            Claim(text=item["claim"], evidence_ids=item["evidence_ids"]) for item in group["claims"]
+        ]
+        started = time.perf_counter()
+        verdicts = semantics.review_claims(targets, group["question"], evidence, generate)
+        seconds = time.perf_counter() - started
+        degraded = verdicts is None
+        if degraded:
+            verdicts = [
+                semantics.review_claim(target, group["question"], evidence, generate)
+                for target in targets
+            ]
+        share = seconds / max(len(targets), 1)
+        for number, (raw_case, verdict) in enumerate(zip(group["claims"], verdicts), start=1):
+            case = {
+                **raw_case,
+                "id": f"{group['id']}-{number}",
+                "held_out": True,
+                "held_out_batch": "第三批（批量场景）",
+            }
+            record = _record(case, verdict, share, batch_seconds=seconds, degraded=degraded)
+            records.append(record)
+            print(
+                f"  [{'OK' if record['correct'] else '!!'}] {record['id']} 整组 {seconds:5.1f}s  "
+                f"{case['claim'][:34]}"
+            )
+    return records
+
+
 async def run(args) -> int:
     dataset = scoring.load_dataset(args.dataset)
-    cases = dataset["cases"]
+    cases = dataset["cases"] if "cases" in dataset else _flatten_groups(dataset["groups"])
     if args.ids:
         wanted = {item.strip() for item in args.ids.split(",") if item.strip()}
         cases = [case for case in cases if case["id"] in wanted]
@@ -198,7 +308,7 @@ async def run(args) -> int:
             print(f"--ids 没有匹配到断言：{args.ids}", file=sys.stderr)
             return 2
 
-    pairs = {(law, article) for case in dataset["cases"] for law, article in case["evidence"]}
+    pairs = {(law, article) for case in cases for law, article in case["evidence"]}
     corpus = await load_corpus(pairs)
     missing = [pair for pair in pairs if pair not in corpus]
     if missing:
@@ -218,33 +328,10 @@ async def run(args) -> int:
             model_name, messages, schema=schema, max_new_tokens=args.max_new_tokens
         )
 
-    records = []
-    for case in cases:
-        evidence = _pin(case, corpus)
-        # 断言本身也走 §9.2 的结构（`claims.Claim`），这样判官看到的输入与线上完全一致
-        target = Claim(text=case["claim"], evidence_ids=case["evidence_ids"])
-        started = time.perf_counter()
-        verdict = semantics.review_claim(target, case["question"], evidence, generate)
-        seconds = time.perf_counter() - started
-        supported = bool(verdict.supported) if verdict is not None else False
-        record = {
-            "id": case["id"],
-            "expect_supported": case["expect_supported"],
-            "defect": case.get("defect"),
-            "held_out": bool(case.get("held_out")),
-            "held_out_batch": case.get("held_out_batch"),
-            "supported": supported,
-            "correct": verdict is not None and supported == case["expect_supported"],
-            "reason": verdict.summary() if verdict is not None else "判官没有给出可解析的结论",
-            "quote": (verdict.evidence_quote if verdict is not None else ""),
-            "claim": case["claim"],
-            "note": case.get("note"),
-            "seconds": seconds,
-        }
-        records.append(record)
-        print(
-            f"  [{'OK' if record['correct'] else '!!'}] {record['id']} {seconds:5.1f}s  {case['claim'][:40]}"
-        )
+    if args.mode == "batch" and dataset.get("groups"):
+        records = _run_batch(dataset["groups"], corpus, generate)
+    else:
+        records = _run_per_claim(cases, corpus, generate)
 
     good = [r for r in records if r["expect_supported"]]
     bad = [r for r in records if not r["expect_supported"]]
@@ -355,6 +442,12 @@ def main() -> int:
     parser.add_argument("--model", default=None)
     parser.add_argument("--max-new-tokens", type=int, default=semantics.JUDGE_MAX_NEW_TOKENS)
     parser.add_argument("--ids", default="", help="逗号分隔的断言 id，只跑这些")
+    parser.add_argument(
+        "--mode",
+        default="per-claim",
+        choices=["per-claim", "batch"],
+        help="per-claim=一条主张一次模型调用；batch=一组主张一次调用（金标准需含 groups）",
+    )
     parser.add_argument("--gate", action="store_true", help="未达标时退出码 1")
     return asyncio.run(_main(parser.parse_args()))
 

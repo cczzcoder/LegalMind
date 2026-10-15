@@ -44,11 +44,10 @@ ISSUE_KINDS = (
     "misattributed",
 )
 
-INSTRUCTIONS = (
-    "下面是一条「主张」以及本次检索到的条文。请判断：**这些条文是否支持这条主张**。\n"
-    "只输出 JSON：\n"
-    '{"supported": true, "evidence_quote": "条文里支持该主张的原句", "issues": []}\n'
-    "\n"
+#: 判据规则与输出要求——**单条版与批量版共用**。
+#: ⚠️ 抽出来是为了「改一处不会漏另一处」；拼接后 `INSTRUCTIONS` 的文本**与改造前逐字一致**
+#: （已用存档比对验证），所以既有评测结论继续有效。
+_JUDGE_RULES = (
     "判断规则（**两个方向不对称，别搞反**）：\n"
     "- 主张比条文**说得少**是允许的——**不要因为主张没覆盖条文的全部内容就判它不支持**。"
     "例如条文写「探矿权的期限为5年，期限届满可以续期，续期最多不超过3次」，"
@@ -67,6 +66,31 @@ INSTRUCTIONS = (
     "找不到这样的句子就不要判支持。\n"
     "- 判 supported=false 时 evidence_quote 填空字符串，并在 issues 里写明多了什么或改了哪里。\n"
     "- issues 为空当且仅当 supported 为 true。"
+)
+
+INSTRUCTIONS = (
+    "下面是一条「主张」以及本次检索到的条文。请判断：**这些条文是否支持这条主张**。\n"
+    "只输出 JSON：\n"
+    '{"supported": true, "evidence_quote": "条文里支持该主张的原句", "issues": []}\n'
+    "\n" + _JUDGE_RULES
+)
+
+#: **批量版**指令：一次判多条主张（见 `review_claims`）。
+#: ⚠️ 多出来的两条硬要求针对**批量特有的失效模式**——**串扰**（前一条影响后一条）与
+#: **漏判**（少给一条结论 = 放行一条）。这两条写死在指令里，而不是指望模型自觉：
+#: 第三份留出集（`claim_verification_batch.json`）就是照这两条设计的。
+BATCH_INSTRUCTIONS = (
+    "下面是一个提问、本次检索到的条文，以及**同一个回答里的多条主张**。"
+    "请**逐条**判断：这些条文是否支持每一条主张。\n"
+    "只输出 JSON：\n"
+    '{"reviews": [{"index": 1, "supported": true, "evidence_quote": "条文里的原句", "issues": []},'
+    ' {"index": 2, "supported": false, "evidence_quote": "", "issues": [{"kind": "not_supported",'
+    ' "detail": "多了什么"}]}]}\n'
+    "\n"
+    "⚠️ 两条硬要求（批量特有，务必遵守）：\n"
+    "- **每条独立判断**：前一条的结论不得影响后一条；即使两条主张引用同一批条文，也要各判各的。\n"
+    "- **一条不漏**：`reviews` 的条数必须与主张条数相同，`index` 从 1 起、与主张编号一一对应。\n"
+    "\n" + _JUDGE_RULES
 )
 
 #: 判官的输出结构。给 Ollama 走**约束解码**——只写 `format: "json"` 挡不住残缺 JSON
@@ -89,6 +113,39 @@ REVIEW_SCHEMA: dict = {
         },
     },
     "required": ["supported", "evidence_quote", "issues"],
+}
+
+#: **批量版**输出结构：一次判多条主张（把 N 次调用压成 1 次，见 `review_claims`）。
+#: ⚠️ 每条**必须带 `index`**（对应第几条主张）——这是「模型有没有条条给出结论」的唯一凭据：
+#: 缺 index 就分不清是漏判还是错位，整批只能降级。约束解码在这里同样必要（§5.11）。
+REVIEW_BATCH_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "reviews": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer"},
+                    "supported": {"type": "boolean"},
+                    "evidence_quote": {"type": "string"},
+                    "issues": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "kind": {"type": "string", "enum": list(ISSUE_KINDS)},
+                                "detail": {"type": "string"},
+                            },
+                            "required": ["kind", "detail"],
+                        },
+                    },
+                },
+                "required": ["index", "supported", "evidence_quote", "issues"],
+            },
+        },
+    },
+    "required": ["reviews"],
 }
 
 
@@ -180,20 +237,97 @@ def parse_review(raw: str) -> ClaimReview | None:
         return None
 
 
-def review_claim(claim, question: str, evidence: list, generate) -> ClaimReview | None:
-    """核验一条主张。`generate` 是 `generation.generate` 的注入点（便于测试与评测复用）。"""
+def build_batch_review_messages(claims: list, question: str, evidence: list) -> list[dict]:
+    """拼出**批量**判官的消息：一次列出多条主张，各自附上「引用」与「未引用」的条文。
+
+    ⚠️ 每条主张的证据**分别列出**，不能只给一份大证据集——判官要判的是「这条主张有没有被
+    **它自己引用的**条文支持」，混在一起就分不清谁引了谁（`review_claim` 也是这么做的）。
+    """
     index_of = {str(index): item for index, item in enumerate(evidence, start=1)}
-    cited = [index_of[item] for item in claim.evidence_ids if item in index_of]
-    others = [
-        item
-        for index, item in enumerate(evidence, start=1)
-        if str(index) not in set(claim.evidence_ids)
+    blocks: list[str] = []
+    for number, claim in enumerate(claims, start=1):
+        cited = [index_of[item] for item in claim.evidence_ids if item in index_of]
+        cited_ids = set(claim.evidence_ids)
+        others = [
+            item for index, item in enumerate(evidence, start=1) if str(index) not in cited_ids
+        ]
+        body = (
+            "\n\n".join(
+                f"[{index}] {_label(item)}\n{item.text}"
+                for index, item in enumerate(cited, start=1)
+            )
+            or "（这条主张没有引用任何条文）"
+        )
+        tail = ""
+        if others:
+            tail = (
+                "\n\n同一批检索里还有（**本条主张没有引用它们**，"
+                "请判断是否遗漏了其中的条件或相反依据）：\n\n"
+            )
+            tail += "\n\n".join(f"[未引用] {_label(item)}\n{item.text}" for item in others)
+        blocks.append(f"主张 {number}：{claim.text or ''}\n\n它引用的条文：\n\n{body}{tail}")
+    return [
+        {
+            "role": "user",
+            "content": f"{BATCH_INSTRUCTIONS}\n\n问题：{question}\n\n" + "\n\n———\n\n".join(blocks),
+        }
     ]
-    raw = generate(
-        build_review_messages(claim.text or "", question, cited, others),
-        schema=REVIEW_SCHEMA,
-    )
-    review = parse_review(raw)
+
+
+def parse_batch_review(raw: str, expected: int) -> list[ClaimReview | None] | None:
+    """解析批量判官输出并**按 `index` 归位**；缺条、重复、越界、解析失败一律返回 None。
+
+    ⚠️ **不「能解析多少算多少」**：漏掉的那条主张会被当成通过，等于放行一条未核验的结论——
+    这正是批量判定最危险的失效模式。宁可整批返回 None、由调用方降级为逐条重跑（见
+    `review_claims`），也不要让一条主张**无声地**没被核验。
+    """
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1] if "\n" in text else ""
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+    try:
+        payload: Any = json.loads(text.strip())
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    items = payload.get("reviews")
+    if not isinstance(items, list) or len(items) != expected:
+        return None
+    out: list[ClaimReview | None] = [None] * expected
+    for item in items:
+        if not isinstance(item, dict):
+            return None
+        try:
+            number = int(item.get("index"))
+        except (TypeError, ValueError):
+            return None
+        if not 1 <= number <= expected or out[number - 1] is not None:
+            return None  # 越界或重复
+        try:
+            out[number - 1] = ClaimReview.model_validate(
+                {key: value for key, value in item.items() if key != "index"}
+            )
+        except ValidationError:
+            return None
+    if any(item is None for item in out):
+        return None
+    return out
+
+
+def cited_of(claim, evidence: list) -> list:
+    """取这条主张**实际引用到的**条文（`evidence_ids` 是 1 起的序号，越界即忽略）。"""
+    index_of = {str(index): item for index, item in enumerate(evidence, start=1)}
+    return [index_of[item] for item in claim.evidence_ids if item in index_of]
+
+
+def _apply_deterministic(claim, review: ClaimReview | None, cited: list) -> ClaimReview | None:
+    """把判官的结论按**确定性规则**复核一遍（只在判官说「支持」时才跑）。
+
+    这三段都不依赖模型，因此**逐条与批量共用同一套**——批量只省模型调用次数，
+    一道核对都不放松。顺序与判据见各自的 docstring。
+    """
     if review is None or not review.supported:
         return review
 
@@ -233,6 +367,45 @@ def review_claim(claim, question: str, evidence: list, generate) -> ClaimReview 
                 issues=[Issue(kind="over_generalized", detail=overreach)],
             )
     return review
+
+
+def review_claim(claim, question: str, evidence: list, generate) -> ClaimReview | None:
+    """核验**一条**主张（逐条模式）。`generate` 是 `generation.generate` 的注入点
+    （便于测试与评测复用）。"""
+    cited = cited_of(claim, evidence)
+    others = [
+        item
+        for index, item in enumerate(evidence, start=1)
+        if str(index) not in set(claim.evidence_ids)
+    ]
+    raw = generate(
+        build_review_messages(claim.text or "", question, cited, others),
+        schema=REVIEW_SCHEMA,
+    )
+    return _apply_deterministic(claim, parse_review(raw), cited)
+
+
+def review_claims(claims: list, question: str, evidence: list, generate) -> list | None:
+    """核验**多条**主张（批量模式）：一次模型调用判完，再逐条跑确定性规则。
+
+    ⚠️ 批量省的是**模型调用次数**（N → 1），不是核验强度：确定性规则一条不少。
+    ⚠️ 批量输出不可用（解析失败 / 缺 `index` / 条数不符）时**返回 `None`**，
+    由 `review` 降级为逐条重跑——提速手段失效时退回安全路径，
+    **绝不让某条主张因为「批量没解析出来」而静默通过**。
+    """
+    if not claims:
+        return []
+    raw = generate(
+        build_batch_review_messages(claims, question, evidence),
+        schema=REVIEW_BATCH_SCHEMA,
+    )
+    parsed = parse_batch_review(raw, len(claims))
+    if parsed is None:
+        return None
+    return [
+        _apply_deterministic(claim, review, cited_of(claim, evidence))
+        for claim, review in zip(claims, parsed, strict=True)
+    ]
 
 
 def quote_in_evidence(quote: str, cited: list) -> bool:
@@ -368,15 +541,24 @@ def review(answer, question: str, evidence: list, generate) -> SemanticReview:
     判官给不出结论（超时、输出解析不出来）时按 §9.4「语义核验模型不可用**不跳过核验**」处理：
     同样不发布，但标成 ``unavailable``，免得和「判官判它不行」混为一谈。
     """
-    reviews: list[ClaimReview] = []
-    for claim in answer.claims:
-        item = review_claim(claim, question, evidence, generate)
+    claims = list(answer.claims)
+    if not claims:
+        return SemanticReview(ok=True, reviews=())
+
+    reviews = review_claims(claims, question, evidence, generate)
+    if reviews is None:
+        # ⚠️ 批量没成（解析失败 / 缺 `index` / 条数不符）→ **退回逐条**：
+        # 慢，但结果一样。降级只影响耗时，**不改变判据**，更不跳过核验。
+        reviews = [review_claim(claim, question, evidence, generate) for claim in claims]
+
+    kept: list[ClaimReview] = []
+    for item in reviews:
         if item is None:
             return SemanticReview(
                 ok=False,
-                reviews=tuple(reviews),
+                reviews=tuple(kept),
                 unavailable=True,
                 reason="判官没有给出可解析的结论",
             )
-        reviews.append(item)
-    return SemanticReview(ok=all(item.supported for item in reviews), reviews=tuple(reviews))
+        kept.append(item)
+    return SemanticReview(ok=all(item.supported for item in kept), reviews=tuple(kept))

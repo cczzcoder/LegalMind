@@ -4,7 +4,7 @@
 成一个长词——那正是选型时踩过的坑（``all_terms_flat`` 因此一度在全部多词查询上 0 命中）。
 """
 
-from app.modules.retrieval.keyword import SELECTED, STRATEGIES, _flat, _terms, selected
+from app.modules.retrieval.keyword import SELECTED, STRATEGIES, _flat, _like_all, _terms, selected
 
 
 def test_flat_removes_ascii_and_full_width_spaces():
@@ -25,6 +25,24 @@ def test_terms_keep_the_separators_from_being_swallowed():
     """先切后平：词间分隔符必须真的切开，不能被整条去空白抹平。"""
     assert _terms("减刑 假释 公示期") == ["减刑", "假释", "公示期"]
     assert _terms("  减刑　、假释  ") == ["减刑", "假释"]
+
+
+def test_like_all_degenerates_to_false_for_empty_terms():
+    """空检索词**不匹配任何东西**，而不是抛 IndexError——这条纵深防御必须钉住。
+
+    `rewrite.variants()` 已经滤掉空白变体，但调用方仍可能直接把空串传进来
+    （`keyword.py` 举的例子是 `POST /search` 的 `semantic`），所以这一层要自己扛：
+    退化成恒假条件，而不是去取 `terms[0]` 崩掉——那会让整条检索 500。
+    """
+    assert str(_like_all([])) == "false"
+
+
+def test_like_all_requires_every_term_to_hit():
+    """多词是 AND：去空白后的条文要同时包含每个词，因此词越多 LIKE 越多。"""
+    single = str(_like_all(["社会保险"])).lower().count("like")
+    both = str(_like_all(["社会保险", "缴纳"])).lower().count("like")
+    assert single >= 1
+    assert both > single
 
 
 def test_selected_strategy_is_one_of_the_candidates():

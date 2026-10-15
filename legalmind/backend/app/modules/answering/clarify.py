@@ -94,6 +94,21 @@ class Clarification:
         return "\n".join(lines)
 
 
+def multi_question_clarification(parts: list[str]) -> Clarification:
+    """**一次问了好几个问题**时的澄清：把它们列出来，让用户挑一个先答。
+
+    ⚠️ 这里**不用模型**（`asked_by="template"`）：拆出来的片段就是用户的原话，
+    让 7B 再复述一遍只会引入改写风险 + 十几秒延迟，**没有任何增益**。
+    ⚠️ 走这条而不是硬答，是因为多问题合在一起检索必然失败（多词 AND 命中不了），
+    而**分开答又会让用户面对一份他没在等长度的答案**——先问清楚，代价最小。
+    """
+    return Clarification(
+        question=f"你一次问了 {len(parts)} 个问题，请告诉我先回答哪一个：",
+        options=tuple(parts),
+        asked_by="template",
+    )
+
+
 class _ClarifyOut(BaseModel):
     question: str = ""
     options: list[str] = Field(default_factory=list)

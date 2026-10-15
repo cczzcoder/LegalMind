@@ -38,7 +38,7 @@ from app.adapters import generation
 from app.adapters.cache import cache_key
 from app.core.config import get_settings
 from app.core.security import Principal
-from app.modules.answering import claims, clarify, runs, semantics
+from app.modules.answering import claims, clarify, runs, semantics, split
 from app.modules.answering.assembly import assemble_evidence
 from app.modules.answering.evidence import (
     INSTRUCTIONS,
@@ -244,6 +244,8 @@ async def answer_question(
         principal,
         resolved,
         run,
+        # ⚠️ 多问题检测要用**用户敲的那句**，不能用补全后的 `resolved`（理由见管道里）
+        typed_question=question,
         limit=limit,
         max_new_tokens=max_new_tokens,
         model=model,
@@ -342,6 +344,7 @@ async def _answer_pipeline(
     question: str,
     run: RunTracker,
     *,
+    typed_question: str | None = None,
     limit: int,
     max_new_tokens: int,
     model: str | None,
@@ -361,6 +364,32 @@ async def _answer_pipeline(
 
     # §9.1 的 `CREATED → CLARIFYING / RETRIEVING`：**澄清发生在检索之前**（FR-06 第 2、3 步）。
     # 判据是确定性的（见 `clarify.needs_clarification`），**不问模型**——实测 7B 判不准。
+    #
+    # ⚠️ **多问题必须先判**：一次问了好几个问题时，拆出来的每一段**可能都不笼统**，
+    # 所以 `needs_clarification` 一个都不触发；可它们**合在一起检索必然失败**——
+    # 关键词段是多词 AND，`用人单位不缴社保费怎么办？劳动合同解除后工资怎么算？` 会变成
+    # 两个长串同时要求命中。而且标点被规范化抹掉后还会粘连出废词（实测 `缴？工资` → `缴工资`）。
+    # 所以先拆，拆出多个就**让用户挑一个**，而不是替他猜先答哪个。
+    # ⚠️ 用**用户敲的那句**（`typed_question`）判，不是 `question`——多轮追问里 `question` 是
+    # **补全后**的「历史 + 当前」，**必然含两个问号**（历史句尾 + 当前句尾），拿它判会把
+    # **每一轮追问都误判成「一次问了多个问题」**（实测：`test_session.py` 的追问用例直接挂掉）。
+    parts = split.split_questions(typed_question or question)
+    if len(parts) > 1:
+        asked = clarify.multi_question_clarification(parts)
+        await _advance(run, "CLARIFYING", on_state)
+        return Answer(
+            question=question,
+            answer=asked.render(),
+            citations=(),
+            # 没走检索，`path` 如实标成 clarify
+            path="clarify",
+            # 模板问法没有用模型——`model=None` 如实反映这一点
+            model=None,
+            seconds=perf_counter() - started,
+            blocked_by="clarifying",
+            clarifying_question=asked.render(),
+        )
+
     reason = clarify.needs_clarification(question)
     if reason is not None:
         model_name = model or get_settings().generation_model

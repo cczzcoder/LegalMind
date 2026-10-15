@@ -358,3 +358,57 @@ async def test_continuation_requires_the_original_question(session_factory, make
             await cache.delete(answer_runs.question_key(run.id))
         with pytest.raises(LookupError, match="过期"):
             await answer_runs.submit_clarification(session, principal, run.id, "补充", cache=cache)
+
+
+def test_multi_question_clarification_lists_the_parts():
+    """多问题澄清：把拆出来的片段列成候选，**不用模型**（`asked_by="template"`）。
+
+    ⚠️ 候选就是用户的原话，让 7B 复述一遍只会引入改写风险 + 十几秒延迟，没有增益。
+    """
+    asked = clarify.multi_question_clarification(["社保怎么缴", "工资怎么发"])
+    assert asked.asked_by == "template"
+    assert asked.options == ("社保怎么缴", "工资怎么发")
+    assert "2 个问题" in asked.question
+    rendered = asked.render()
+    assert "1. 社保怎么缴" in rendered
+    assert "2. 工资怎么发" in rendered
+
+
+async def test_multiple_questions_ask_the_user_to_pick_one(monkeypatch, session_factory, make_user):
+    """一次问了多个问题 → `CLARIFYING` 让用户挑一个：**不检索、也不调模型**。
+
+    ⚠️ 为什么不能硬答：多问题合在一起，关键词段是多词 AND（两个长串同时要求命中，必然零命中），
+    而标点被规范化抹掉后还会粘连出废词（实测 `缴？工资` → `缴工资`）。
+    """
+    called = False
+
+    async def explode(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("多问题不该去检索")
+
+    def no_model(*_a, **_k):
+        raise AssertionError("多问题澄清是模板问法，不该调用模型")
+
+    monkeypatch.setattr(service, "search_provisions", explode)
+    monkeypatch.setattr(service.generation, "generate", no_model)
+    principal = await _principal(make_user)
+
+    async with session_factory() as session:
+        answer = await service.answer_question(session, principal, "社保怎么缴？工资怎么发？")
+        run = await session.scalar(
+            select(AnswerRun).where(AnswerRun.organization_id == principal.organization_id)
+        )
+
+    assert called is False
+    assert answer.blocked_by == "clarifying"
+    assert answer.published is False
+    assert answer.path == "clarify"
+    assert answer.citations == ()
+    # 模板问法：`model=None` 如实反映「这一轮没有用模型」
+    assert answer.model is None
+    assert "2 个问题" in answer.answer
+    assert "社保怎么缴" in answer.answer
+    assert "工资怎么发" in answer.answer
+    assert run.state == "CLARIFYING"
+    assert run.published is False
